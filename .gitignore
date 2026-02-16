@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+tracker.db
+build/
+dist/
+*.spec
+config.json
