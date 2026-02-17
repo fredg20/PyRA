@@ -259,10 +259,14 @@ class TrackerApp:
 
     # Method: _set_emulator_status - Met à jour le statut Live/Inactif affiché près du sélecteur de thème.
     def _set_emulator_status(self, is_live: bool) -> None:
-        self.emulator_status_text.set("Live" if is_live else "Inactif ou inconnu")
+        previous = self.emulator_status_text.get().strip()
+        next_status = "Live" if is_live else "Inactif ou inconnu"
+        self.emulator_status_text.set(next_status)
         if self.emulator_status_label is not None:
             style_name = "EmulatorStatusLive.TLabel" if is_live else "EmulatorStatusUnknown.TLabel"
             self.emulator_status_label.configure(style=style_name)
+        if previous != next_status and not self.is_closing:
+            self.refresh_dashboard(show_errors=False)
 
     # Method: _restart_emulator_probe - Planifie la prochaine détection de l'émulateur.
     def _restart_emulator_probe(self, immediate: bool = False) -> None:
@@ -1680,11 +1684,13 @@ class TrackerApp:
                 break
 
         online = self._safe_bool(summary.get("IsOnline")) or self._safe_bool(summary.get("IsOnine"))
+        if not online and not rich_presence:
+            return 0, "", rich_presence, online
 
         direct_pairs = (
+            ("GameID", "GameTitle"),
             ("MostRecentGameID", "MostRecentGameTitle"),
             ("LastGameID", "LastGame"),
-            ("GameID", "GameTitle"),
         )
         for game_id_field, title_field in direct_pairs:
             game_id = self._safe_int(summary.get(game_id_field))
@@ -1703,6 +1709,30 @@ class TrackerApp:
                 return game_id, title, rich_presence, online
 
         return 0, "", rich_presence, online
+
+    # Method: _extract_last_played_game - Extrait le dernier jeu joué depuis le résumé API.
+    def _extract_last_played_game(self, summary: dict[str, object]) -> tuple[int, str]:
+        direct_pairs = (
+            ("MostRecentGameID", "MostRecentGameTitle"),
+            ("LastGameID", "LastGame"),
+            ("GameID", "GameTitle"),
+        )
+        for game_id_field, title_field in direct_pairs:
+            game_id = self._safe_int(summary.get(game_id_field))
+            if game_id > 0:
+                return game_id, self._extract_title_text(summary.get(title_field))
+
+        recent = summary.get("RecentlyPlayed")
+        if isinstance(recent, list):
+            for item in recent:
+                if not isinstance(item, dict):
+                    continue
+                game_id = self._safe_int(item.get("GameID") or item.get("ID"))
+                if game_id <= 0:
+                    continue
+                title = self._extract_title_text(item.get("Title") or item.get("GameTitle") or item)
+                return game_id, title
+        return 0, ""
 
     # Method: _build_current_game_local_rows - Construit les lignes du résumé local du jeu courant.
     def _build_current_game_local_rows(
@@ -1751,6 +1781,7 @@ class TrackerApp:
                 if game_id > 0:
                     games_lookup[game_id] = item
 
+        emulator_live = self.emulator_status_text.get().strip().casefold() == "live"
         fallback_game_id, fallback_title = self._pick_current_game(dashboard)
         fallback_key = (username, fallback_game_id)
         same_fallback = fallback_game_id > 0 and self._current_game_last_key == fallback_key
@@ -1759,7 +1790,7 @@ class TrackerApp:
                 fallback_game_id,
                 fallback_title,
                 games_lookup,
-                source="Fallback local",
+                source="Dernier jeu joué (local)" if not emulator_live else "Fallback local",
             )
             if not same_fallback:
                 self.current_game_title.set(title_value)
@@ -1778,9 +1809,12 @@ class TrackerApp:
         api_key = self.api_key.get().strip()
         if not api_key:
             if fallback_game_id > 0:
-                self.current_game_note.set("Jeu estimé localement (clé API manquante pour la détection en direct).")
+                if emulator_live:
+                    self.current_game_note.set("Jeu estimé localement (clé API manquante pour la détection en direct).")
+                else:
+                    self.current_game_note.set("Émulateur inactif: dernier jeu joué affiché depuis les données locales.")
             else:
-                self.current_game_note.set("Clé API manquante pour détecter le jeu en direct.")
+                self.current_game_note.set("Clé API manquante pour détecter le jeu en direct ou le dernier jeu joué.")
             return
 
         if self._current_game_last_key is None or not same_fallback:
@@ -1789,7 +1823,7 @@ class TrackerApp:
         fetch_token = self._current_game_fetch_token
         worker = threading.Thread(
             target=self._fetch_current_game_worker,
-            args=(api_key, username, fallback_game_id, fallback_title, games_lookup, fetch_token),
+            args=(api_key, username, fallback_game_id, fallback_title, games_lookup, emulator_live, fetch_token),
             daemon=True,
         )
         worker.start()
@@ -1802,11 +1836,12 @@ class TrackerApp:
         fallback_game_id: int,
         fallback_title: str,
         games_lookup: dict[int, dict[str, object]],
+        emulator_live: bool,
         fetch_token: int,
     ) -> None:
         game_id = fallback_game_id
         title_hint = fallback_title
-        source_label = "Fallback local"
+        source_label = "Dernier jeu joué (local)" if not emulator_live else "Fallback local"
         rich_presence = ""
         images: dict[str, bytes] = {}
         next_achievement: dict[str, str] | None = None
@@ -1817,25 +1852,36 @@ class TrackerApp:
         try:
             summary = client.get_user_summary(username, include_recent_games=True)
             live_game_id, live_title, rich_presence, is_online = self._extract_live_current_game(summary)
-            if live_game_id > 0:
+            last_played_id, last_played_title = self._extract_last_played_game(summary)
+
+            if emulator_live and live_game_id > 0:
                 game_id = live_game_id
                 if live_title:
                     title_hint = live_title
                 source_label = "Live émulateur" if (is_online or rich_presence) else "Live API"
+            elif last_played_id > 0:
+                game_id = last_played_id
+                if last_played_title:
+                    title_hint = last_played_title
+                source_label = "Dernier jeu joué"
             elif fallback_game_id <= 0:
                 source_label = "Inconnu"
         except (RetroAPIError, OSError, ValueError):
             if fallback_game_id > 0:
-                source_label = "Fallback local"
+                source_label = "Dernier jeu joué (local)" if not emulator_live else "Fallback local"
             else:
                 source_label = "Inconnu"
 
         detected_key = (username, game_id if game_id > 0 else 0)
         if self._current_game_last_key == detected_key:
+            unchanged_note = "Jeu en cours inchangé."
+            if source_label.startswith("Dernier jeu joué"):
+                unchanged_note = "Dernier jeu joué inchangé."
             self._queue_ui_callback(
-                lambda: self._on_current_game_unchanged(
+                lambda source_value=source_label, note=unchanged_note: self._on_current_game_unchanged(
                     fetch_token=fetch_token,
-                    note="Jeu en cours inchangé.",
+                    note=note,
+                    source_value=source_value,
                 )
             )
             return
@@ -1861,7 +1907,7 @@ class TrackerApp:
                     achievement_rows=[],
                     images={},
                     error=None,
-                    note="Aucun jeu en cours détecté.",
+                    note="Aucun jeu en cours ou dernier jeu joué détecté.",
                 )
             )
             return
@@ -1918,7 +1964,12 @@ class TrackerApp:
             source=source_label,
             rich_presence=rich_presence,
         )
-        note = "Jeu détecté en direct." if source_label.startswith("Live") else "Détails chargés."
+        if source_label.startswith("Live"):
+            note = "Jeu détecté en direct."
+        elif source_label.startswith("Dernier jeu joué"):
+            note = "Émulateur inactif: affichage du dernier jeu joué."
+        else:
+            note = "Détails chargés."
         self._queue_ui_callback(
             lambda: self._on_current_game_loaded(
                 fetch_token=fetch_token,
@@ -1937,9 +1988,11 @@ class TrackerApp:
         )
 
     # Method: _on_current_game_unchanged - Conserve l'affichage actuel quand le jeu détecté n'a pas changé.
-    def _on_current_game_unchanged(self, fetch_token: int, note: str) -> None:
+    def _on_current_game_unchanged(self, fetch_token: int, note: str, source_value: str = "") -> None:
         if fetch_token != self._current_game_fetch_token:
             return
+        if source_value.strip():
+            self._set_current_game_source(source_value)
         self.current_game_note.set(note)
         if self.current_game_achievement_tiles and self.current_game_achievement_scroll_job is None:
             self._restart_current_game_achievement_auto_scroll(immediate=False)
