@@ -6,4 +6,5 @@ tracker.db
 build/
 dist/
 *.spec
+*.log
 config.json

@@ -3,9 +3,12 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from retro_tracker.debug_logger import log_debug
+
 
 # Function: init_db - Initialise le schéma SQLite de l'application.
 def init_db(db_path: str) -> None:
+    log_debug(f"init_db start db_path='{db_path}'")
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -18,10 +21,13 @@ def init_db(db_path: str) -> None:
                 true_points INTEGER NOT NULL DEFAULT 0,
                 total_games INTEGER NOT NULL DEFAULT 0,
                 mastered_games INTEGER NOT NULL DEFAULT 0,
-                beaten_games INTEGER NOT NULL DEFAULT 0
+                beaten_games INTEGER NOT NULL DEFAULT 0,
+                last_played_game_id INTEGER NOT NULL DEFAULT 0,
+                last_played_game_title TEXT NOT NULL DEFAULT ''
             )
             """
         )
+        _ensure_snapshots_columns(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS game_progress (
@@ -57,6 +63,7 @@ def init_db(db_path: str) -> None:
             """
         )
         conn.commit()
+    log_debug(f"init_db done db_path='{db_path}'")
 
 
 # Function: save_snapshot - Enregistre un instantané complet dans la base locale.
@@ -66,8 +73,11 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
     recent = _list_of_dict(snapshot.get("recent_achievements"))
     username = str(snapshot.get("username", ""))
     captured_at = str(snapshot.get("captured_at", ""))
+    last_played_game_id = _to_int(snapshot.get("last_played_game_id"))
+    last_played_game_title = str(snapshot.get("last_played_game_title", "")).strip()
 
     if not username or not captured_at:
+        log_debug("save_snapshot invalid snapshot: username/captured_at missing")
         raise ValueError("Snapshot invalide: username/captured_at manquant.")
 
     points = _to_int(profile.get("TotalPoints") or profile.get("Points"))
@@ -95,8 +105,14 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
         and "mastered" not in str(game.get("HighestAwardKind", "")).lower()
     )
 
+    log_debug(
+        f"save_snapshot start db_path='{db_path}' username='{username}' "
+        f"games_in={len(games)} games_normalized={len(normalized_games)} recent_in={len(recent)} "
+        f"last_played_game_id={last_played_game_id}"
+    )
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
+        _ensure_snapshots_columns(conn)
         cursor = conn.execute(
             """
             INSERT INTO snapshots (
@@ -107,8 +123,10 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
                 true_points,
                 total_games,
                 mastered_games,
-                beaten_games
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                beaten_games,
+                last_played_game_id,
+                last_played_game_title
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 username,
@@ -119,9 +137,12 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
                 len(normalized_games),
                 mastered_games,
                 beaten_games,
+                last_played_game_id,
+                last_played_game_title,
             ),
         )
         snapshot_id = cursor.lastrowid
+        log_debug(f"save_snapshot inserted snapshot_id={snapshot_id}")
 
         conn.executemany(
             """
@@ -183,10 +204,15 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
             ],
         )
         conn.commit()
+    log_debug(
+        f"save_snapshot done snapshot_id={snapshot_id} username='{username}' "
+        f"mastered={mastered_games} beaten={beaten_games}"
+    )
 
 
 # Function: get_dashboard_data - Construit les données agrégées pour le tableau de bord.
 def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
+    log_debug(f"get_dashboard_data start db_path='{db_path}' username='{username}'")
     data: dict[str, Any] = {
         "latest": None,
         "delta": None,
@@ -194,15 +220,18 @@ def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
         "recent_achievements": [],
     }
     if not username:
+        log_debug("get_dashboard_data abort: empty username")
         return data
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
+        _ensure_snapshots_columns(conn)
 
         snapshots = conn.execute(
             """
             SELECT id, captured_at, total_points, softcore_points, true_points,
-                   total_games, mastered_games, beaten_games
+                   total_games, mastered_games, beaten_games,
+                   last_played_game_id, last_played_game_title
             FROM snapshots
             WHERE username = ?
             ORDER BY id DESC
@@ -212,10 +241,15 @@ def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
         ).fetchall()
 
         if not snapshots:
+            log_debug("get_dashboard_data no snapshots found")
             return data
 
         latest = dict(snapshots[0])
         data["latest"] = latest
+        log_debug(
+            f"get_dashboard_data latest snapshot_id={latest.get('id')} "
+            f"captured_at='{latest.get('captured_at')}' snapshots_count={len(snapshots)}"
+        )
 
         if len(snapshots) > 1:
             previous = dict(snapshots[1])
@@ -253,6 +287,7 @@ def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
             }
             for game in games
         ]
+        log_debug(f"get_dashboard_data games_count={len(data['games'])}")
 
         recent = conn.execute(
             """
@@ -265,7 +300,9 @@ def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
             (latest["id"],),
         ).fetchall()
         data["recent_achievements"] = [dict(row) for row in recent]
+        log_debug(f"get_dashboard_data recent_achievements_count={len(data['recent_achievements'])}")
 
+    log_debug("get_dashboard_data done")
     return data
 
 
@@ -294,3 +331,15 @@ def _completion_pct(num_awarded_hardcore: int, max_possible: int) -> float:
     if max_possible <= 0:
         return 0.0
     return round((num_awarded_hardcore / max_possible) * 100.0, 1)
+
+
+# Function: _ensure_snapshots_columns - Ajoute les colonnes manquantes pour conserver le dernier jeu joue.
+def _ensure_snapshots_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(snapshots)").fetchall()
+    names = {str(row[1]) for row in rows}
+    if "last_played_game_id" not in names:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN last_played_game_id INTEGER NOT NULL DEFAULT 0")
+        log_debug("migration snapshots: colonne last_played_game_id ajoutee")
+    if "last_played_game_title" not in names:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN last_played_game_title TEXT NOT NULL DEFAULT ''")
+        log_debug("migration snapshots: colonne last_played_game_title ajoutee")
