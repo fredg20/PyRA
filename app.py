@@ -11,7 +11,6 @@ import subprocess
 import sys
 import threading
 import base64
-from datetime import datetime
 from pathlib import Path
 from tkinter import END, HORIZONTAL, LEFT, VERTICAL, W, BooleanVar, Canvas, Menu, PhotoImage, StringVar, TclError, Tk, Toplevel, messagebox
 from tkinter import font as tkfont
@@ -21,6 +20,7 @@ import requests
 
 from retro_tracker.debug_logger import get_debug_logger, install_global_exception_logging
 from retro_tracker.db import get_dashboard_data, init_db, save_snapshot
+from retro_tracker.mixins import AchievementMixin, ParsingMixin
 from retro_tracker.ra_api import RetroAPIError, RetroAchievementsClient
 
 
@@ -31,7 +31,6 @@ AUTO_SYNC_INTERVAL_MS = 60_000
 EVENT_SYNC_DELAY_MS = 550
 EMULATOR_POLL_INTERVAL_MS = 1_000
 ACHIEVEMENT_SCROLL_INTERVAL_MS = 75
-AUTO_SCROLL_MIN_ACHIEVEMENTS = 33
 WINDOW_GEOMETRY_RE = re.compile(r"^\d+x\d+[+-]\d+[+-]\d+$")
 EMULATOR_PROCESS_HINTS = (
     "retroarch",
@@ -91,7 +90,7 @@ def debug_log_path_candidates() -> list[Path]:
 
 
 # Class: TrackerApp - Orchestre l'interface, la synchronisation et les interactions utilisateur.
-class TrackerApp:
+class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: __init__ - Initialise l'objet et prépare son état interne.
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -579,7 +578,7 @@ class TrackerApp:
         self.profile_button.bind("<Motion>", self._on_profile_button_motion)
         self.profile_button.bind("<Leave>", self._on_profile_button_leave)
         self.summary_label = ttk.Label(self.top_bar, textvariable=self.connection_summary)
-        self.summary_label.grid(row=0, column=2, sticky=W)
+        self.summary_label.grid(row=0, column=2, padx=(6, 0), sticky=W)
         self.theme_toggle_frame = ttk.Frame(self.top_bar)
         self.theme_toggle_frame.grid(row=0, column=3, padx=(0, 0), sticky="e")
         self.theme_light_label = ttk.Label(self.theme_toggle_frame, text="Light", style="ThemeToggle.TLabel", cursor="hand2")
@@ -996,39 +995,6 @@ class TrackerApp:
 
         return False, raw.casefold()
 
-    # Method: _parse_sort_datetime - Analyse et convertit la valeur reçue.
-    def _parse_sort_datetime(self, raw: str) -> datetime | None:
-        text = raw.strip()
-        if not text:
-            return None
-
-        candidates = [
-            text,
-            text.replace("Z", "+00:00"),
-            text.replace(" UTC", "+00:00"),
-            text.replace("T", " "),
-        ]
-        for candidate in candidates:
-            try:
-                return datetime.fromisoformat(candidate)
-            except ValueError:
-                continue
-
-        formats = (
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%d/%m/%Y %H:%M:%S",
-            "%d/%m/%Y %H:%M",
-            "%d/%m/%Y",
-        )
-        for fmt in formats:
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
-        return None
-
     # Method: _reapply_tree_sort - Réalise le traitement lié à reapply tree sort.
     def _reapply_tree_sort(self, tree: ttk.Treeview | None) -> None:
         if tree is None:
@@ -1262,7 +1228,17 @@ class TrackerApp:
 
     # Method: _should_auto_scroll_current_game_achievements - Détermine si le défilement automatique doit être actif.
     def _should_auto_scroll_current_game_achievements(self) -> bool:
-        return len(self.current_game_achievement_tiles) >= AUTO_SCROLL_MIN_ACHIEVEMENTS
+        if not self.current_game_achievement_tiles:
+            return False
+        canvas = self.current_game_achievements_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return False
+        try:
+            first, last = canvas.yview()
+        except TclError:
+            return False
+        visible_span = max(0.0, float(last) - float(first))
+        return visible_span < 0.999
 
     # Method: _restart_current_game_achievement_auto_scroll - Planifie le prochain déplacement automatique.
     def _restart_current_game_achievement_auto_scroll(self, immediate: bool = False) -> None:
@@ -1314,6 +1290,14 @@ class TrackerApp:
         if width > 0:
             self.current_game_achievements_canvas.itemconfigure(self.current_game_achievements_window_id, width=width)
         self._layout_current_game_achievement_gallery(width_hint=width)
+        region = self.current_game_achievements_canvas.bbox("all")
+        self.current_game_achievements_canvas.configure(scrollregion=region if region is not None else (0, 0, 0, 0))
+        if self._should_auto_scroll_current_game_achievements():
+            if not self.current_game_achievement_hovered and self.current_game_achievement_scroll_job is None:
+                self._restart_current_game_achievement_auto_scroll(immediate=False)
+        else:
+            self._stop_current_game_achievement_auto_scroll()
+            self.current_game_achievements_canvas.yview_moveto(0.0)
 
     # Method: _layout_current_game_achievement_gallery - Organise les badges selon la largeur disponible.
     def _layout_current_game_achievement_gallery(self, width_hint: int | None = None) -> None:
@@ -1838,210 +1822,6 @@ class TrackerApp:
             self.current_game_image_refs[key] = image
             label.configure(image=image, text="")
 
-    # Method: _normalize_media_url - Normalise la valeur dans un format exploitable.
-    def _normalize_media_url(self, path: str) -> str:
-        raw = path.strip()
-        if not raw:
-            return ""
-        if raw.lower().startswith("http://") or raw.lower().startswith("https://"):
-            return raw
-        if not raw.startswith("/"):
-            raw = f"/{raw}"
-        return f"https://media.retroachievements.org{raw}"
-
-    # Method: _extract_game_achievements - Extrait la liste des succès depuis le payload détaillé du jeu.
-    def _extract_game_achievements(self, payload: dict[str, object]) -> list[dict[str, object]]:
-        raw = payload.get("Achievements")
-        achievements: list[dict[str, object]] = []
-        if isinstance(raw, dict):
-            for key, value in raw.items():
-                if not isinstance(value, dict):
-                    continue
-                item = dict(value)
-                if "ID" not in item:
-                    item["ID"] = key
-                achievements.append(item)
-        elif isinstance(raw, list):
-            for value in raw:
-                if isinstance(value, dict):
-                    achievements.append(dict(value))
-
-        # Method: sort_key - Détermine l'ordre d'affichage le plus lisible.
-        def sort_key(item: dict[str, object]) -> tuple[int, int, str]:
-            display = self._safe_int(item.get("DisplayOrder"))
-            if display <= 0:
-                display = 999_999
-            ach_id = self._safe_int(item.get("ID"))
-            if ach_id <= 0:
-                ach_id = 999_999
-            title = self._safe_text(item.get("Title")).casefold()
-            return display, ach_id, title
-
-        achievements.sort(key=sort_key)
-        return achievements
-
-    # Method: _is_achievement_unlocked - Vérifie si le succès est déjà débloqué par l'utilisateur.
-    def _is_achievement_unlocked(self, achievement: dict[str, object]) -> bool:
-        if self._safe_bool(achievement.get("IsUnlocked")) or self._safe_bool(achievement.get("Unlocked")):
-            return True
-
-        for key in ("DateEarnedHardcore", "DateEarned", "DateEarnedAt", "DateEarnedHardcoreAt", "DateUnlocked"):
-            if self._safe_text(achievement.get(key)):
-                return True
-
-        locked_text = self._safe_text(achievement.get("Locked")).lower()
-        if locked_text in {"0", "false", "no"}:
-            return True
-        if locked_text in {"1", "true", "yes"}:
-            return False
-        return False
-
-    # Method: _achievement_badge_url - Construit l'URL d'image d'un succès.
-    def _achievement_badge_url(self, achievement: dict[str, object]) -> str:
-        direct = (
-            "BadgeURL",
-            "BadgeUri",
-            "BadgeImageUrl",
-            "Badge",
-            "BadgeName",
-        )
-        for key in direct:
-            raw = self._safe_text(achievement.get(key))
-            if not raw:
-                continue
-            lowered = raw.lower()
-            if lowered.startswith("http://") or lowered.startswith("https://"):
-                return raw
-            if raw.startswith("/"):
-                return self._normalize_media_url(raw)
-            if "badge/" in lowered:
-                return self._normalize_media_url(raw)
-            if raw.endswith(".png") or raw.endswith(".jpg") or raw.endswith(".jpeg"):
-                return self._normalize_media_url(raw)
-            return f"https://media.retroachievements.org/Badge/{raw}.png"
-        return ""
-
-    # Method: _locked_badge_url - Convertit l'URL du badge vers sa variante verrouillée (_lock).
-    def _locked_badge_url(self, badge_url: str) -> str:
-        raw = badge_url.strip()
-        if not raw:
-            return ""
-        base = raw
-        suffix = ""
-        for sep in ("?", "#"):
-            idx = base.find(sep)
-            if idx != -1:
-                suffix = base[idx:]
-                base = base[:idx]
-                break
-        if "_lock." in base.lower():
-            return raw
-        dot_idx = base.rfind(".")
-        if dot_idx <= 0:
-            return f"{base}_lock{suffix}"
-        return f"{base[:dot_idx]}_lock{base[dot_idx:]}{suffix}"
-
-    # Method: _format_tooltip_description_three_lines - Formate une description sur 1 à 3 lignes lisibles selon sa longueur.
-    def _format_tooltip_description_three_lines(self, description: str, line_max: int = 62) -> str:
-        normalized = " ".join(description.split())
-        if len(normalized) <= line_max:
-            return normalized
-
-        words = normalized.split(" ")
-        lines: list[str] = []
-        current_parts: list[str] = []
-        for word in words:
-            if not current_parts:
-                current_parts = [word]
-                continue
-            candidate = " ".join(current_parts + [word])
-            if len(candidate) <= line_max or len(lines) >= 2:
-                current_parts.append(word)
-            else:
-                lines.append(" ".join(current_parts).strip())
-                current_parts = [word]
-        if current_parts:
-            lines.append(" ".join(current_parts).strip())
-
-        if len(lines) <= 3:
-            return "\n".join(lines)
-
-        trimmed = lines[:2]
-        remaining = " ".join(lines[2:]).strip()
-        trimmed.append(remaining)
-        return "\n".join(trimmed)
-
-    # Method: _build_achievement_tooltip - Formate le texte à afficher au survol d'un badge.
-    def _build_achievement_tooltip(self, achievement: dict[str, object]) -> str:
-        title = self._safe_text(achievement.get("Title")) or f"Succès #{self._safe_int(achievement.get('ID'))}"
-        description = self._safe_text(achievement.get("Description")) or "Sans description."
-        formatted_description = self._format_tooltip_description_three_lines(description)
-        return f"{title}\n{formatted_description}"
-
-    # Method: _safe_float - Convertit une valeur numérique vers float de manière tolérante.
-    def _safe_float(self, value: object) -> float | None:
-        if isinstance(value, (int, float)):
-            return float(value)
-        text = self._safe_text(value).replace(",", ".")
-        if not text:
-            return None
-        text = re.sub(r"[^0-9\.\-]", "", text)
-        if text in {"", "-", ".", "-."}:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            return None
-
-    # Method: _build_achievement_feasibility - Évalue la difficulté estimée d'un succès à partir des statistiques publiques.
-    def _build_achievement_feasibility(self, awarded: int, total_players: int, true_ratio_value: float | None) -> str:
-        if total_players > 0 and awarded >= 0:
-            unlock_pct = (awarded * 100.0) / max(1, total_players)
-            if unlock_pct >= 50.0:
-                level = "Très facile"
-            elif unlock_pct >= 25.0:
-                level = "Facile"
-            elif unlock_pct >= 10.0:
-                level = "Moyenne"
-            elif unlock_pct >= 3.0:
-                level = "Difficile"
-            else:
-                level = "Très difficile"
-            return f"{level} ({unlock_pct:.1f}% des joueurs)"
-
-        if true_ratio_value is not None:
-            if true_ratio_value <= 1.5:
-                level = "Très facile"
-            elif true_ratio_value <= 2.5:
-                level = "Facile"
-            elif true_ratio_value <= 4.0:
-                level = "Moyenne"
-            elif true_ratio_value <= 8.0:
-                level = "Difficile"
-            else:
-                level = "Très difficile"
-            return f"{level} (TrueRatio {true_ratio_value:.2f})"
-
-        return "Inconnue"
-
-    # Method: _build_next_achievement_summary - Prépare les champs de la section du premier succès non débloqué.
-    def _build_next_achievement_summary(self, achievement: dict[str, object], total_players: int = 0) -> dict[str, str]:
-        title = self._safe_text(achievement.get("Title")) or f"Succès #{self._safe_int(achievement.get('ID'))}"
-        description = self._safe_text(achievement.get("Description")) or "Sans description."
-        points = self._safe_int(achievement.get("Points"))
-        true_ratio = self._safe_text(achievement.get("TrueRatio")) or "-"
-        true_ratio_value = self._safe_float(achievement.get("TrueRatio"))
-        awarded = self._safe_int(achievement.get("NumAwarded"))
-        awarded_hardcore = self._safe_int(achievement.get("NumAwardedHardcore"))
-        feasibility = self._build_achievement_feasibility(awarded, total_players, true_ratio_value)
-        return {
-            "title": title,
-            "description": description,
-            "points": f"{points} points | True ratio: {true_ratio}",
-            "unlocks": f"Global: {awarded} | Hardcore: {awarded_hardcore}",
-            "feasibility": feasibility,
-        }
-
     # Method: _pick_current_game - Sélectionne l'élément le plus pertinent.
     def _pick_current_game(self, dashboard: dict[str, object], prefer_last_played: bool = False) -> tuple[int, str]:
         if prefer_last_played:
@@ -2076,76 +1856,6 @@ class TrackerApp:
         if not isinstance(best, dict):
             return 0, ""
         return self._safe_int(best.get("game_id")), str(best.get("title", "")).strip()
-
-    # Method: _safe_int - Exécute l'opération avec gestion d'erreur renforcée.
-    def _safe_int(self, value: object) -> int:
-        try:
-            return int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return 0
-
-    # Method: _safe_bool - Convertit une valeur en booléen de manière tolérante.
-    def _safe_bool(self, value: object) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return value != 0
-        text = str(value).strip().lower()
-        return text in {"1", "true", "yes", "on", "online"}
-
-    # Method: _safe_text - Convertit une valeur simple en texte sans exposer une structure brute.
-    def _safe_text(self, value: object) -> str:
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, (int, float)):
-            return str(value).strip()
-        return ""
-
-    # Method: _extract_title_text - Extrait un titre de jeu lisible depuis une valeur API potentiellement imbriquée.
-    def _extract_title_text(self, value: object) -> str:
-        plain = self._safe_text(value)
-        if plain:
-            return plain
-        if isinstance(value, dict):
-            preferred = (
-                "Title",
-                "GameTitle",
-                "Name",
-                "GameName",
-                "MostRecentGameTitle",
-                "LastGame",
-            )
-            for key in preferred:
-                text = self._safe_text(value.get(key))
-                if text:
-                    return text
-            for key, item in value.items():
-                if "title" in key.lower():
-                    text = self._safe_text(item)
-                    if text:
-                        return text
-            return ""
-        if isinstance(value, list):
-            for item in value:
-                text = self._extract_title_text(item)
-                if text:
-                    return text
-        return ""
-
-    # Method: _format_datetime_display - Formate une date brute en date+heure lisibles.
-    def _format_datetime_display(self, raw: object) -> str:
-        text = self._safe_text(raw)
-        if not text:
-            return ""
-        parsed = self._parse_sort_datetime(text)
-        if parsed is None:
-            return text
-        if parsed.tzinfo is not None:
-            try:
-                parsed = parsed.astimezone().replace(tzinfo=None)
-            except ValueError:
-                pass
-        return parsed.strftime("%Y-%m-%d %H:%M")
 
     # Method: _extract_live_current_game - Extrait le jeu en cours depuis le résumé API.
     def _extract_live_current_game(self, summary: dict[str, object]) -> tuple[int, str, str, bool]:
@@ -2769,22 +2479,10 @@ class TrackerApp:
                 self.top_bar.columnconfigure(col, weight=0)
             self.top_bar.columnconfigure(2, weight=1)
             self.summary_label.configure(wraplength=max(200, width - 430))
-
-            if width < 780:
-                self.connection_button.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=0, sticky=W)
-                self.profile_button.grid_configure(row=0, column=1, columnspan=1, padx=(0, 8), pady=0, sticky=W)
-                self.summary_label.grid_configure(row=1, column=0, columnspan=4, pady=(4, 0), sticky="ew")
-                self.theme_toggle_frame.grid_configure(row=0, column=3, columnspan=1, padx=(0, 0), pady=0, sticky="e")
-            elif width < 980:
-                self.connection_button.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=(0, 4), sticky=W)
-                self.profile_button.grid_configure(row=0, column=1, columnspan=1, padx=(0, 8), pady=(0, 4), sticky=W)
-                self.summary_label.grid_configure(row=1, column=0, columnspan=4, pady=(4, 0), sticky="ew")
-                self.theme_toggle_frame.grid_configure(row=0, column=3, columnspan=1, padx=(0, 0), pady=(0, 4), sticky="e")
-            else:
-                self.connection_button.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=0, sticky=W)
-                self.profile_button.grid_configure(row=0, column=1, columnspan=1, padx=(0, 8), pady=0, sticky=W)
-                self.summary_label.grid_configure(row=0, column=2, columnspan=1, pady=0, sticky=W)
-                self.theme_toggle_frame.grid_configure(row=0, column=3, columnspan=1, padx=(0, 0), pady=0, sticky="e")
+            self.connection_button.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=0, sticky=W)
+            self.profile_button.grid_configure(row=0, column=1, columnspan=1, padx=(0, 8), pady=0, sticky=W)
+            self.summary_label.grid_configure(row=0, column=2, columnspan=1, padx=(6, 0), pady=0, sticky=W)
+            self.theme_toggle_frame.grid_configure(row=0, column=3, columnspan=1, padx=(0, 0), pady=0, sticky="e")
 
         if self.current_game_title_value_label is not None:
             self.current_game_title_value_label.configure(wraplength=max(240, min(920, width - 470)))
