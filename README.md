@@ -39,7 +39,7 @@ pip install -r requirements.txt
 ## Lancer l'application
 
 ```powershell
-python app.py
+python main.py
 ```
 
 Au premier demarrage:
@@ -50,6 +50,24 @@ Au premier demarrage:
 4. Cliquer sur `Enregistrer`
 
 La synchronisation demarre ensuite automatiquement.
+
+## Rich Presence (important)
+
+Pour que PyRA detecte correctement l'activite en cours (`Live`), il faut activer le **Rich Presence** dans l'emulateur.
+
+Emplacements les plus courants:
+
+- DuckStation: `Tools` > `Achievements` (activer Rich Presence)
+- PCSX2: `Tools` > `Achievements` (activer Rich Presence)
+- Dolphin: `Tools` > `Achievements` (activer Rich Presence)
+- BizHawk: `Tools` > `RetroAchievements` (activer Rich Presence)
+- PPSSPP: `Settings` > `Tools` > `Achievements` (activer Rich Presence)
+
+Pour les autres emulateurs compatibles RetroAchievements:
+
+- Ouvrir les parametres `Achievements` ou `RetroAchievements`
+- Activer `Rich Presence`
+- Verifier que vous etes connecte au meme compte RetroAchievements que dans PyRA
 
 ## Generer l'executable `.exe`
 

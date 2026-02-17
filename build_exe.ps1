@@ -5,11 +5,52 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 }
 $pythonExe = ".\.venv\Scripts\python.exe"
 
+function Stop-RunningPyRA {
+    $running = Get-Process -Name "PyRA" -ErrorAction SilentlyContinue
+    if (-not $running) {
+        return
+    }
+    Write-Host "Instance PyRA detectee, fermeture avant build..."
+    foreach ($proc in $running) {
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+        } catch {
+            Write-Host "Impossible de fermer le process PID=$($proc.Id): $($_.Exception.Message)"
+            throw
+        }
+    }
+    Start-Sleep -Milliseconds 400
+}
+
+function Remove-FileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathToRemove,
+        [int]$MaxTries = 8
+    )
+    if (-not (Test-Path $PathToRemove)) {
+        return
+    }
+    for ($i = 1; $i -le $MaxTries; $i++) {
+        try {
+            Remove-Item $PathToRemove -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq $MaxTries) {
+                throw "Impossible de supprimer '$PathToRemove' (fichier verrouille)."
+            }
+            Start-Sleep -Milliseconds 300
+        }
+    }
+}
+
+Stop-RunningPyRA
+
 if (Test-Path "dist\PyRATracker.exe") {
-    Remove-Item "dist\PyRATracker.exe" -Force
+    Remove-FileWithRetry -PathToRemove "dist\PyRATracker.exe"
 }
 if (Test-Path "dist\PyRA.exe") {
-    Remove-Item "dist\PyRA.exe" -Force
+    Remove-FileWithRetry -PathToRemove "dist\PyRA.exe"
 }
 
 $iconPath = $null
@@ -47,6 +88,8 @@ $pyInstallerArgs = @(
     "--clean",
     "--onefile",
     "--windowed",
+    "--exclude-module", "PIL",
+    "--exclude-module", "pygments",
     "--name", "PyRA"
 )
 if ($iconPath) {
@@ -73,7 +116,7 @@ if ($iconPath) {
 } else {
     Write-Host "Aucune icone detectee a la racine. Build sans icone personnalisee."
 }
-$pyInstallerArgs += "app.py"
+$pyInstallerArgs += "main.py"
 
 & $pythonExe -m PyInstaller @pyInstallerArgs
 if ($LASTEXITCODE -ne 0) {

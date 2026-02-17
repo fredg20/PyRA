@@ -12,6 +12,26 @@ class ParsingMixin:
         if not text:
             return None
 
+        # Accepte aussi les timestamps Unix (secondes, millisecondes, microsecondes)
+        # et le format /Date(1700000000000)/ utilisé par certains payloads legacy.
+        unix_text = text
+        if text.startswith("/Date(") and text.endswith(")/"):
+            unix_text = text[6:-2].strip()
+        unix_digits = unix_text
+        if unix_digits.startswith("-"):
+            unix_digits = unix_digits[1:]
+        if unix_digits.isdigit():
+            try:
+                value = float(unix_text)
+                abs_value = abs(value)
+                if abs_value > 1e14:
+                    value = value / 1_000_000.0
+                elif abs_value > 1e11:
+                    value = value / 1_000.0
+                return datetime.fromtimestamp(value)
+            except (ValueError, OSError, OverflowError):
+                pass
+
         candidates = [
             text,
             text.replace("Z", "+00:00"),

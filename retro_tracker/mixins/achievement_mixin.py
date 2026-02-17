@@ -1,8 +1,130 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+import time
+from typing import Any
+
 
 # Class: AchievementMixin - Fournit les méthodes liées à l'analyse et à l'affichage des succès.
 class AchievementMixin:
+    # Method: _translate_achievement_description_to_french - Traduit une description en francais avec cache et fallback local.
+    def _translate_achievement_description_to_french(self, description: str) -> str:
+        text = " ".join(description.split())
+        if not text:
+            return ""
+
+        now = time.time()
+        cache = getattr(self, "_achievement_translation_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_achievement_translation_cache", cache)
+        cached = cache.get(text)
+        if isinstance(cached, str):
+            return cached
+
+        fail_cache = getattr(self, "_achievement_translation_fail_cache", None)
+        if not isinstance(fail_cache, dict):
+            fail_cache = {}
+            setattr(self, "_achievement_translation_fail_cache", fail_cache)
+        last_failed_at = fail_cache.get(text)
+        if isinstance(last_failed_at, (int, float)) and (now - float(last_failed_at)) < 60:
+            return text
+
+        if bool(getattr(self, "_achievement_translation_disabled", False)):
+            return text
+
+        translator_factory = None
+        translator = getattr(self, "_achievement_translator", None)
+        if translator is None:
+            try:
+                from googletrans import Translator  # type: ignore[import-not-found]
+
+                translator_factory = Translator
+                translator = Translator()
+                setattr(self, "_achievement_translator", translator)
+            except Exception:
+                setattr(self, "_achievement_translation_disabled", True)
+                return text
+
+        if translator_factory is None:
+            try:
+                from googletrans import Translator  # type: ignore[import-not-found]
+
+                translator_factory = Translator
+            except Exception:
+                translator_factory = None
+
+        # Heuristique simple pour forcer une 2e tentative avec source anglaise.
+        lowered = f" {text.casefold()} "
+        english_markers = (
+            " the ",
+            " and ",
+            " with ",
+            " without ",
+            " unlock ",
+            " defeated ",
+            " defeat ",
+            " collect ",
+            " complete ",
+            " kill ",
+            " use ",
+            " win ",
+            " find ",
+            " level ",
+            " boss ",
+        )
+        looks_english = any(marker in lowered for marker in english_markers)
+        sources: list[str | None] = [None]
+        if looks_english:
+            sources.append("en")
+
+        translated = ""
+        for source in sources:
+            attempts = 2
+            for _ in range(attempts):
+                try:
+                    kwargs: dict[str, str] = {"dest": "fr"}
+                    if source is not None:
+                        kwargs["src"] = source
+                    result: Any = translator.translate(text, **kwargs)
+                    if inspect.isawaitable(result):
+                        try:
+                            result = asyncio.run(result)
+                        except RuntimeError:
+                            loop = asyncio.new_event_loop()
+                            try:
+                                result = loop.run_until_complete(result)
+                            finally:
+                                loop.close()
+                    translated = self._safe_text(getattr(result, "text", ""))
+                    if translated:
+                        break
+                except Exception:
+                    translated = ""
+                    if translator_factory is not None:
+                        try:
+                            translator = translator_factory()
+                            setattr(self, "_achievement_translator", translator)
+                        except Exception:
+                            pass
+                if translated:
+                    break
+            if translated:
+                # Si l'auto-détection n'a rien changé, on essaie la source anglaise.
+                if source is None and translated.casefold() == text.casefold() and looks_english:
+                    translated = ""
+                    continue
+                break
+
+        if not translated:
+            fail_cache[text] = now
+            return text
+
+        fail_cache.pop(text, None)
+        cache[text] = translated
+        return translated
+
     # Method: _extract_game_achievements - Extrait la liste des succès depuis le payload détaillé du jeu.
     def _extract_game_achievements(self, payload: dict[str, object]) -> list[dict[str, object]]:
         raw = payload.get("Achievements")
@@ -164,11 +286,18 @@ class AchievementMixin:
         return "Inconnue"
 
     # Method: _build_next_achievement_summary - Prépare les champs de la section du premier succès non débloqué.
-    def _build_next_achievement_summary(self, achievement: dict[str, object], total_players: int = 0) -> dict[str, str]:
+    def _build_next_achievement_summary(
+        self,
+        achievement: dict[str, object],
+        total_players: int = 0,
+        translate_description: bool = True,
+    ) -> dict[str, str]:
         title = self._safe_text(achievement.get("Title")) or f"Succès #{self._safe_int(achievement.get('ID'))}"
         description = self._safe_text(achievement.get("Description")) or "Sans description."
+        if translate_description:
+            description = self._translate_achievement_description_to_french(description)
         points = self._safe_int(achievement.get("Points"))
-        true_ratio = self._safe_text(achievement.get("TrueRatio")) or "-"
+        true_ratio = self._safe_text(achievement.get("TrueRatio")) or "N/A"
         true_ratio_value = self._safe_float(achievement.get("TrueRatio"))
         awarded = self._safe_int(achievement.get("NumAwarded"))
         awarded_hardcore = self._safe_int(achievement.get("NumAwardedHardcore"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from typing import Any
 
 from retro_tracker.debug_logger import log_debug
@@ -9,7 +10,7 @@ from retro_tracker.debug_logger import log_debug
 # Function: init_db - Initialise le schéma SQLite de l'application.
 def init_db(db_path: str) -> None:
     log_debug(f"init_db start db_path='{db_path}'")
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS snapshots (
@@ -110,7 +111,7 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
         f"games_in={len(games)} games_normalized={len(normalized_games)} recent_in={len(recent)} "
         f"last_played_game_id={last_played_game_id}"
     )
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
         _ensure_snapshots_columns(conn)
         cursor = conn.execute(
@@ -223,7 +224,7 @@ def get_dashboard_data(db_path: str, username: str) -> dict[str, Any]:
         log_debug("get_dashboard_data abort: empty username")
         return data
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         _ensure_snapshots_columns(conn)
 
