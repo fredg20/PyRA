@@ -21,6 +21,11 @@ PyRA est une application desktop (Python/Tkinter) pour suivre un compte RetroAch
 - `Succes recents`
 - `Profil` (bouton + entree dans `Fichier`)
 
+## TODO
+
+- Corriger et etendre la traduction des descriptions de succes (qualite inegale et non appliquee partout).
+- Ajouter un bouton d'ordre des succes avec 3 modes: `Normal`, `Easy -> Hard` (base sur la faisabilite, uniquement sur les succes non debloques), `Hard -> Easy` (base sur la faisabilite, uniquement sur les succes non debloques). Regle a conserver: `succes non debloques` en premier.
+
 ## Prerequis
 
 - Windows
