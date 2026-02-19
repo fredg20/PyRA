@@ -2,8 +2,6 @@
 
 from pathlib import Path
 from tkinter import PhotoImage, TclError
-from tkinter import font as tkfont
-from tkinter import ttk
 
 from retro_tracker.json_store import write_json_file
 from retro_tracker.paths import config_path

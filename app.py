@@ -13,12 +13,12 @@ import base64
 from datetime import datetime
 from ctypes import wintypes
 from pathlib import Path
-from tkinter import END, HORIZONTAL, LEFT, VERTICAL, W, BooleanVar, Canvas, Menu, PhotoImage, StringVar, TclError, Tk, Toplevel, messagebox
+from tkinter import END, HORIZONTAL, LEFT, W, BooleanVar, Canvas, Menu, PhotoImage, StringVar, TclError, Tk, Toplevel, messagebox
 from tkinter import ttk
 
 import requests
 
-from retro_tracker.app_meta import APP_NAME, APP_VERSION
+from retro_tracker.app_meta import APP_NAME
 from retro_tracker.debug_logger import get_debug_logger
 from retro_tracker.db import get_dashboard_data, init_db, save_snapshot
 from retro_tracker.mixins import (
@@ -32,7 +32,45 @@ from retro_tracker.mixins import (
 )
 from retro_tracker.paths import data_dir
 from retro_tracker.ra_api import RetroAPIError, RetroAchievementsClient
-from retro_tracker.runtime_constants import *  # noqa: F403
+from retro_tracker.runtime_constants import (
+    ACHIEVEMENT_CLICK_DOUBLE_WINDOW_SECONDS,
+    ACHIEVEMENT_CLICK_PREVIEW_MS,
+    ACHIEVEMENT_CLICK_PREVIEW_UNLOCKED_MS,
+    ACHIEVEMENT_IMAGE_CORNER_RADIUS,
+    ACHIEVEMENT_NA_VALUE,
+    ACHIEVEMENT_ORDER_CYCLE,
+    ACHIEVEMENT_ORDER_EASY_TO_HARD,
+    ACHIEVEMENT_ORDER_HARD_TO_EASY,
+    ACHIEVEMENT_ORDER_LABELS,
+    ACHIEVEMENT_ORDER_NORMAL,
+    ACHIEVEMENT_SCROLL_INTERVAL_MS,
+    AUTO_SYNC_INTERVAL_MS,
+    CURRENT_GAME_LOADING_OVERLAY_MAX_MS,
+    DEFAULT_WIDGET_CORNER_RADIUS,
+    DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND_SMALL,
+    EMULATOR_STATUS_EMULATOR_LOADED,
+    EMULATOR_STATUS_GAME_LOADED,
+    EMULATOR_STATUS_INACTIVE,
+    EMULATOR_UNLOCK_PREVIEW_MS,
+    EVENT_SYNC_DELAY_MS,
+    EVENT_SYNC_IDLE_MIN_GAP_MS,
+    EVENT_SYNC_LIVE_MIN_GAP_MS,
+    IMAGE_FETCH_TIMEOUT_SECONDS,
+    IMAGE_ROUNDING_INSET,
+    LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS,
+    LIVE_RECENT_PLAYED_MAX_AGE_SECONDS,
+    LIVE_RICH_PRESENCE_MAX_AGE_SECONDS,
+    MAIN_TAB_CURRENT,
+    MAIN_TAB_GAMES,
+    MAIN_TAB_LABELS,
+    MAIN_TAB_ORDER,
+    MAIN_TAB_RECENT,
+    MAX_ACHIEVEMENT_BADGE_FETCH,
+    NEXT_ACHIEVEMENT_BADGE_MAX_SIZE,
+    PROBE_LOG_PREFIX,
+    PROBE_LOG_REPEAT_MIN_INTERVAL_SECONDS,
+)
 
 
 if os.name == "nt":
@@ -177,6 +215,7 @@ class TrackerApp(
         self.current_game_clicked_achievement_key = ""
         self.current_game_clicked_achievement_persistent = False
         self.current_game_clicked_achievement_restore_job: str | None = None
+        self.current_game_emulator_unlock_restore_job: str | None = None
         self.current_game_last_clicked_achievement_key = ""
         self.current_game_last_clicked_achievement_click_monotonic = 0.0
         self.current_game_achievement_refs: dict[str, PhotoImage] = {}
@@ -262,6 +301,9 @@ class TrackerApp(
         self._event_watch_unlock_marker = ""
         self._event_pending_game_id = 0
         self._event_pending_unlock_marker = ""
+        self._pending_emulator_unlock_preview: dict[str, str] | None = None
+        self._last_emulator_unlock_preview_signature = ""
+        self._last_emulator_probe_matches: dict[str, list[str]] = {}
         self.has_saved_connection_record = False
         self.is_closing = False
         self.debug_logger: logging.Logger | None = None
@@ -336,6 +378,12 @@ class TrackerApp(
         self.startup_init_job = None
         if self.is_closing:
             return
+        # Évite d'afficher des reliquats de la session précédente pendant l'initialisation.
+        self._current_game_details_cache.clear()
+        self._current_game_images_cache.clear()
+        self._image_bytes_cache.clear()
+        self._clear_progress_recent_cache()
+        self._clear_current_game_details("Chargement des données du jeu...")
         self._set_startup_loader_progress(20, "Chargement des données locales...")
         self.refresh_dashboard(show_errors=False, sync_before_refresh=False)
         if self.is_closing:
@@ -705,6 +753,8 @@ class TrackerApp(
                     stack.append(child)    # Method: _clear_current_game_details - Réinitialise les données ciblées.
     def _clear_current_game_details(self, note: str) -> None:
         self._debug_log(f"_clear_current_game_details note='{note}'")
+        self._cancel_current_game_emulator_unlock_restore_job()
+        self._pending_emulator_unlock_preview = None
         self.current_game_title.set("-")
         self.current_game_console.set("-")
         self.current_game_progress.set("-")
@@ -1845,6 +1895,16 @@ class TrackerApp(
             pass
         self.current_game_clicked_achievement_restore_job = None
 
+    # Method: _cancel_current_game_emulator_unlock_restore_job - Annule le retour automatique après l'aperçu d'un succès débloqué.
+    def _cancel_current_game_emulator_unlock_restore_job(self) -> None:
+        if self.current_game_emulator_unlock_restore_job is None:
+            return
+        try:
+            self.root.after_cancel(self.current_game_emulator_unlock_restore_job)
+        except TclError:
+            pass
+        self.current_game_emulator_unlock_restore_job = None
+
     # Method: _clear_current_game_clicked_achievement_selection - Réinitialise la sélection d'un succès cliqué dans la galerie.
     def _clear_current_game_clicked_achievement_selection(self) -> None:
         self._cancel_current_game_clicked_achievement_restore_job()
@@ -1860,6 +1920,17 @@ class TrackerApp(
             if not isinstance(row, dict):
                 continue
             if self._safe_text(row.get("image_key")) == key:
+                return row
+        return None
+
+    # Method: _find_current_game_achievement_row_by_id - Retourne la ligne de données associée à un ID de succès.
+    def _find_current_game_achievement_row_by_id(self, achievement_id: int) -> dict[str, str] | None:
+        if achievement_id <= 0:
+            return None
+        for row in self.current_game_achievement_data:
+            if not isinstance(row, dict):
+                continue
+            if self._safe_int(row.get("next_id")) == achievement_id:
                 return row
         return None
 
@@ -1883,6 +1954,43 @@ class TrackerApp(
         self._set_current_game_next_badge_from_image_key(self._safe_text(row.get("image_key")))
         self._refresh_achievement_navigation_buttons_state()
         return True
+
+    # Method: _show_emulator_unlocked_achievement_preview - Affiche temporairement le succès débloqué détecté en direct.
+    def _show_emulator_unlocked_achievement_preview(self, achievement_data: dict[str, str]) -> None:
+        self._cancel_current_game_emulator_unlock_restore_job()
+        self._clear_current_game_clicked_achievement_selection()
+        self._set_current_game_achievement_rows(
+            {
+                "title": self._safe_text(achievement_data.get("title")) or ACHIEVEMENT_NA_VALUE,
+                "description": self._safe_text(achievement_data.get("description")) or "Succès débloqué.",
+                "points": self._safe_text(achievement_data.get("points")) or ACHIEVEMENT_NA_VALUE,
+                "unlocks": self._safe_text(achievement_data.get("unlocks")) or ACHIEVEMENT_NA_VALUE,
+                "feasibility": self._safe_text(achievement_data.get("feasibility")) or "Débloqué",
+            },
+            has_achievements=True,
+        )
+        image_key = self._safe_text(achievement_data.get("image_key"))
+        if image_key:
+            self._set_current_game_next_badge_from_image_key(image_key)
+        self.current_game_emulator_unlock_restore_job = self.root.after(
+            EMULATOR_UNLOCK_PREVIEW_MS,
+            self._restore_current_game_after_emulator_unlock_preview,
+        )
+        self._debug_log(
+            f"_show_emulator_unlocked_achievement_preview achievement_id={self._safe_int(achievement_data.get('achievement_id'))} "
+            f"duration_ms={EMULATOR_UNLOCK_PREVIEW_MS}"
+        )
+
+    # Method: _restore_current_game_after_emulator_unlock_preview - Restaure l'affichage standard après l'aperçu d'un succès débloqué.
+    def _restore_current_game_after_emulator_unlock_preview(self) -> None:
+        self.current_game_emulator_unlock_restore_job = None
+        if self.current_game_locked_achievements:
+            self._apply_locked_achievement_index()
+            return
+        has_achievements = bool(self.current_game_achievement_data)
+        self._set_current_game_achievement_rows(None, has_achievements=has_achievements)
+        self._set_current_game_images(self.current_game_active_images)
+        self._refresh_achievement_navigation_buttons_state()
 
     # Method: _restore_current_game_main_achievement_after_click_preview - Restaure l'affichage standard après l'aperçu temporaire.
     def _restore_current_game_main_achievement_after_click_preview(self) -> None:
@@ -2373,22 +2481,16 @@ class TrackerApp(
         recent = summary.get("RecentlyPlayed")
         recent_activity_detected = False
         best_recent_game_id = 0
-        best_recent_title = ""
         best_recent_timestamp = -1.0
         strict_best_recent_game_id = 0
         strict_best_recent_title = ""
         strict_best_recent_timestamp = -1.0
-        fallback_recent_game_id = 0
-        fallback_recent_title = ""
         if isinstance(recent, list):
             for item in recent:
                 if not isinstance(item, dict):
                     continue
                 game_id = self._safe_int(item.get("GameID") or item.get("ID"))
                 title = self._extract_title_text(item.get("Title") or item.get("GameTitle") or item)
-                if game_id > 0 and fallback_recent_game_id <= 0:
-                    fallback_recent_game_id = game_id
-                    fallback_recent_title = title
 
                 candidate_date = (
                     self._safe_text(item.get("LastPlayed"))
@@ -2407,7 +2509,6 @@ class TrackerApp(
                     if game_id > 0 and candidate_timestamp > best_recent_timestamp:
                         best_recent_timestamp = candidate_timestamp
                         best_recent_game_id = game_id
-                        best_recent_title = title
                 is_strict_recent_item = self._is_recent_activity_timestamp(
                     candidate_date,
                     max_age_seconds=LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS,
@@ -3301,6 +3402,7 @@ class TrackerApp(
             source_value or self.current_game_source.get()
         )
         self._trigger_refresh_after_live_game_loaded(source_value or self.current_game_source.get())
+        self._apply_pending_emulator_unlock_preview_if_ready()
         if self._has_missing_current_game_achievement_badges():
             self._debug_log("_on_current_game_unchanged: relance chargement badges manquants (N/A détecté).")
             self._start_missing_achievement_badges_loader()
@@ -3436,6 +3538,7 @@ class TrackerApp(
             source_value or self.current_game_source.get()
         )
         self._trigger_refresh_after_live_game_loaded(source_value or self.current_game_source.get())
+        self._apply_pending_emulator_unlock_preview_if_ready()
         self._finalize_current_game_loading_overlay_after_gallery()
 
     # Method: _stat_label - Réalise le traitement lié à stat label.
@@ -3533,6 +3636,149 @@ class TrackerApp(
                     best_timestamp = timestamp
                     latest_award = raw
         return f"{points}|{softcore_points}|{true_points}|{latest_award}"
+
+    # Method: _extract_latest_unlocked_achievement_event - Extrait le succès le plus récent d'un snapshot API.
+    def _extract_latest_unlocked_achievement_event(self, snapshot: dict[str, object]) -> dict[str, str] | None:
+        recent = snapshot.get("recent_achievements")
+        if not isinstance(recent, list):
+            return None
+        best_entry: dict[str, object] | None = None
+        best_timestamp = -1.0
+        fallback_entry: dict[str, object] | None = None
+        for item in recent:
+            if not isinstance(item, dict):
+                continue
+            achievement_id = self._safe_int(item.get("AchievementID") or item.get("ID"))
+            if achievement_id <= 0:
+                continue
+            if fallback_entry is None:
+                fallback_entry = item
+            date_text = (
+                self._safe_text(item.get("DateAwarded"))
+                or self._safe_text(item.get("Date"))
+                or self._safe_text(item.get("DateModified"))
+            )
+            parsed = self._parse_sort_datetime(date_text)
+            timestamp = parsed.timestamp() if parsed is not None else -1.0
+            if timestamp > best_timestamp:
+                best_timestamp = timestamp
+                best_entry = item
+        candidate = best_entry if isinstance(best_entry, dict) else fallback_entry
+        if not isinstance(candidate, dict):
+            return None
+        achievement_id = self._safe_int(candidate.get("AchievementID") or candidate.get("ID"))
+        if achievement_id <= 0:
+            return None
+        game_id = self._safe_int(candidate.get("GameID"))
+        title = self._safe_text(candidate.get("Title")) or f"Succès #{achievement_id}"
+        game_title = self._safe_text(candidate.get("GameTitle"))
+        points_value = self._safe_int(candidate.get("Points"))
+        unlocked_at = (
+            self._safe_text(candidate.get("DateAwarded"))
+            or self._safe_text(candidate.get("Date"))
+            or self._safe_text(candidate.get("DateModified"))
+        )
+        hardcore = "1" if self._safe_bool(candidate.get("HardcoreMode")) else "0"
+        signature = f"{game_id}|{achievement_id}|{unlocked_at}|{hardcore}|{title}"
+        return {
+            "game_id": str(game_id),
+            "achievement_id": str(achievement_id),
+            "title": title,
+            "game_title": game_title,
+            "points": f"{points_value} points",
+            "unlocked_at": unlocked_at,
+            "hardcore": hardcore,
+            "signature": signature,
+        }
+
+    # Method: _emit_emulator_unlock_probes - Émet les sondes "succès débloqué" pour tous les émulateurs connus.
+    def _emit_emulator_unlock_probes(self, unlocked_event: dict[str, str] | None, stage: str, unlock_marker: str = "") -> None:
+        probe_matches = self._last_emulator_probe_matches if isinstance(self._last_emulator_probe_matches, dict) else {}
+        if not probe_matches:
+            return
+        achievement_id = self._safe_int(unlocked_event.get("achievement_id")) if isinstance(unlocked_event, dict) else 0
+        game_id = self._safe_int(unlocked_event.get("game_id")) if isinstance(unlocked_event, dict) else 0
+        title = self._safe_text(unlocked_event.get("title")) if isinstance(unlocked_event, dict) else ""
+        self._probe_each_emulator_achievement_unlock(
+            probe_matches,
+            stage=stage,
+            unlocked=bool(unlocked_event),
+            achievement_id=achievement_id,
+            game_id=game_id,
+            title=title,
+            unlock_marker=unlock_marker,
+        )
+
+    # Method: _queue_pending_emulator_unlock_preview - Prépare l'aperçu temporaire du succès débloqué pour la prochaine mise à jour UI.
+    def _queue_pending_emulator_unlock_preview(self, unlocked_event: dict[str, str] | None) -> None:
+        if not isinstance(unlocked_event, dict):
+            return
+        achievement_id = self._safe_int(unlocked_event.get("achievement_id"))
+        if achievement_id <= 0:
+            return
+        signature = self._safe_text(unlocked_event.get("signature"))
+        if signature and signature == self._last_emulator_unlock_preview_signature:
+            return
+        if signature:
+            self._last_emulator_unlock_preview_signature = signature
+        self._pending_emulator_unlock_preview = dict(unlocked_event)
+        self._emit_emulator_unlock_probes(unlocked_event, stage="sync_success", unlock_marker=self._event_pending_unlock_marker)
+        self._probe(
+            "queue_emulator_unlock_preview",
+            achievement_id=achievement_id,
+            game_id=self._safe_int(unlocked_event.get("game_id")),
+            title=self._safe_text(unlocked_event.get("title")) or "-",
+        )
+
+    # Method: _apply_pending_emulator_unlock_preview_if_ready - Affiche l'aperçu du succès débloqué quand les données du jeu sont prêtes.
+    def _apply_pending_emulator_unlock_preview_if_ready(self) -> None:
+        unlocked_event = self._pending_emulator_unlock_preview
+        if not isinstance(unlocked_event, dict):
+            return
+        achievement_id = self._safe_int(unlocked_event.get("achievement_id"))
+        if achievement_id <= 0:
+            self._pending_emulator_unlock_preview = None
+            return
+        current_game_id = 0
+        if self._current_game_last_key is not None:
+            current_game_id = self._safe_int(self._current_game_last_key[1])
+        unlocked_game_id = self._safe_int(unlocked_event.get("game_id"))
+        if unlocked_game_id > 0 and current_game_id > 0 and unlocked_game_id != current_game_id:
+            self._probe(
+                "apply_emulator_unlock_preview_skip",
+                reason="game_mismatch",
+                unlocked_game_id=unlocked_game_id,
+                current_game_id=current_game_id,
+                achievement_id=achievement_id,
+            )
+            self._pending_emulator_unlock_preview = None
+            return
+
+        row = self._find_current_game_achievement_row_by_id(achievement_id)
+        if isinstance(row, dict):
+            description = self._safe_text(row.get("next_description"))
+            description = self._translate_achievement_description_cached_only(description)
+            preview_data = {
+                "achievement_id": str(achievement_id),
+                "image_key": self._safe_text(row.get("image_key")),
+                "title": self._safe_text(row.get("next_title")) or self._safe_text(unlocked_event.get("title")),
+                "description": description or "Succès débloqué.",
+                "points": self._safe_text(row.get("next_points")) or self._safe_text(unlocked_event.get("points")),
+                "unlocks": self._safe_text(row.get("next_unlocks")) or "Débloqué",
+                "feasibility": "Débloqué",
+            }
+        else:
+            preview_data = {
+                "achievement_id": str(achievement_id),
+                "image_key": "",
+                "title": self._safe_text(unlocked_event.get("title")) or f"Succès #{achievement_id}",
+                "description": "Succès débloqué récemment sur l'émulateur.",
+                "points": self._safe_text(unlocked_event.get("points")) or ACHIEVEMENT_NA_VALUE,
+                "unlocks": "Débloqué",
+                "feasibility": "Débloqué",
+            }
+        self._pending_emulator_unlock_preview = None
+        self._show_emulator_unlocked_achievement_preview(preview_data)
 
     # Method: _event_sync_probe_worker - Vérifie les changements distants puis notifie l'UI.
     def _event_sync_probe_worker(self, api_key: str, username: str, emulator_live: bool, reason: str) -> None:
@@ -3641,6 +3887,16 @@ class TrackerApp(
             unlock_changed=unlock_changed,
             ui_status=ui_status,
         )
+        if unlock_changed:
+            self._emit_emulator_unlock_probes(
+                {
+                    "achievement_id": "0",
+                    "game_id": str(detected_game_id),
+                    "title": "En attente de synchronisation",
+                },
+                stage="event_probe",
+                unlock_marker=unlock_marker,
+            )
 
         if not effective_game_changed and not unlock_changed:
             self._event_watch_game_id = detected_game_id
@@ -3860,6 +4116,7 @@ class TrackerApp(
             "current_game_loading_hard_timeout_job",
             "current_game_achievement_scroll_job",
             "current_game_clicked_achievement_restore_job",
+            "current_game_emulator_unlock_restore_job",
         ):
             job_id = getattr(self, job_name, None)
             if job_id is None:
@@ -4270,12 +4527,16 @@ class TrackerApp(
     def _sync_worker(self, show_errors: bool) -> None:
         config = self._config_values()
         username = self._tracked_username()
+        pending_unlock_marker = self._event_pending_unlock_marker.strip()
         self._debug_log(
             f"_sync_worker start show_errors={show_errors} user='{username}' db_path='{config['db_path']}'"
         )
+        unlocked_event: dict[str, str] | None = None
         try:
             client = RetroAchievementsClient(config["api_key"])
             snapshot = client.fetch_snapshot(username)
+            if pending_unlock_marker:
+                unlocked_event = self._extract_latest_unlocked_achievement_event(snapshot)
             save_snapshot(config["db_path"], snapshot)
         except (RetroAPIError, OSError, sqlite3.Error, ValueError) as exc:
             error_message = str(exc)
@@ -4285,7 +4546,7 @@ class TrackerApp(
             )
             return
         self._debug_log("_sync_worker succès")
-        self._queue_ui_callback(lambda: self._on_sync_success(show_errors))
+        self._queue_ui_callback(lambda: self._on_sync_success(show_errors, unlocked_event))
 
     # Method: _queue_ui_callback - Planifie l'action sur le thread d'interface.
     def _queue_ui_callback(self, callback) -> None:
@@ -4312,6 +4573,7 @@ class TrackerApp(
         self.sync_in_progress = False
         if self.sync_button is not None:
             self.sync_button.state(["!disabled"])
+        self._pending_emulator_unlock_preview = None
         self._debug_log(
             f"_on_sync_error show_errors={show_errors} diagnostic='{diagnostic_message}' message='{message}'"
         )
@@ -4328,10 +4590,11 @@ class TrackerApp(
             messagebox.showerror("Erreur de synchronisation", message)
 
     # Method: _on_sync_success - Traite l'événement correspondant.
-    def _on_sync_success(self, show_errors: bool) -> None:
+    def _on_sync_success(self, show_errors: bool, unlocked_event: dict[str, str] | None = None) -> None:
         self.sync_in_progress = False
         if self.sync_button is not None:
             self.sync_button.state(["!disabled"])
+        self._queue_pending_emulator_unlock_preview(unlocked_event)
         if self._event_watch_username == self._tracked_username():
             if self._event_pending_game_id > 0:
                 self._event_watch_game_id = self._event_pending_game_id

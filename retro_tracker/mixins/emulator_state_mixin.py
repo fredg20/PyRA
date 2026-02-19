@@ -82,6 +82,53 @@ class EmulatorStateMixin:
                 matches=", ".join(matches[:3]) if matches else "-",
             )
 
+    # Method: _probe_each_emulator_achievement_unlock - Émet une sonde dédiée "succès débloqué" pour chaque émulateur.
+    def _probe_each_emulator_achievement_unlock(
+        self,
+        probe_matches: dict[str, list[str]],
+        stage: str,
+        unlocked: bool,
+        achievement_id: int = 0,
+        game_id: int = 0,
+        title: str = "",
+        unlock_marker: str = "",
+    ) -> None:
+        active_emulators = sorted(name for name, matches in probe_matches.items() if bool(matches))
+        single_active = active_emulators[0] if len(active_emulators) == 1 else ""
+        for emulator_name in sorted(probe_matches.keys()):
+            matches = probe_matches.get(emulator_name, [])
+            live = bool(matches)
+            if not unlocked:
+                state = "idle"
+                unlocked_here = False
+                confidence = "high"
+            elif not live:
+                state = "inactive"
+                unlocked_here = False
+                confidence = "high"
+            elif single_active:
+                unlocked_here = single_active == emulator_name
+                state = "unlocked" if unlocked_here else "other_active"
+                confidence = "high"
+            else:
+                unlocked_here = True
+                state = "ambiguous"
+                confidence = "low"
+
+            self._probe(
+                f"emulator_achievement_probe_{emulator_name}",
+                stage=stage,
+                state=state,
+                live=live,
+                unlocked=unlocked_here,
+                confidence=confidence,
+                achievement_id=achievement_id,
+                game_id=game_id,
+                title=title or "-",
+                unlock_marker=bool(unlock_marker),
+                matches=", ".join(matches[:3]) if matches else "-",
+            )
+
     def _is_emulator_live_status_text(self, status_text: str) -> bool:
         normalized = status_text.strip().casefold()
         return normalized in {
@@ -120,6 +167,7 @@ class EmulatorStateMixin:
             is_live = False
             probe_matches = {}
         if probe_matches:
+            self._last_emulator_probe_matches = {name: list(matches) for name, matches in probe_matches.items()}
             self._probe_each_emulator(probe_matches, stage="startup")
             self._probe_each_emulator_game_load(probe_matches, stage="startup")
         self._last_emulator_probe_live = is_live
@@ -259,6 +307,7 @@ class EmulatorStateMixin:
         self.emulator_probe_in_progress = False
         self._last_emulator_probe_live = is_live
         if probe_matches:
+            self._last_emulator_probe_matches = {name: list(matches) for name, matches in probe_matches.items()}
             self._probe_each_emulator(probe_matches, stage="poll")
             self._probe_each_emulator_game_load(probe_matches, stage="poll")
         status_before = self.emulator_status_text.get().strip().casefold()

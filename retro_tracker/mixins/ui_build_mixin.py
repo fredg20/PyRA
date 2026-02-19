@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from tkinter import END, HORIZONTAL, VERTICAL, W, Canvas, Menu, TclError
+from tkinter import HORIZONTAL, VERTICAL, W, Canvas, Menu, TclError
 from tkinter import font as tkfont
 from tkinter import ttk
 
