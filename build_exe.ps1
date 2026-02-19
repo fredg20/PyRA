@@ -56,7 +56,7 @@ if (Test-Path "dist\PyRA.exe") {
 $iconPath = $null
 
 # Priorite absolue aux icones .ico explicites.
-$preferredIcons = @("icon.ico", "app.ico", "PyRA.ico")
+$preferredIcons = @("icon.ico", "app.ico", "PyRA.ico", "trophy_flames_all_sizes.ico")
 foreach ($iconName in $preferredIcons) {
     if (Test-Path $iconName) {
         $iconPath = (Resolve-Path $iconName).Path

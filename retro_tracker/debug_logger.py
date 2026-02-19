@@ -1,30 +1,22 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from retro_tracker.paths import debug_log_path_candidates as app_debug_log_path_candidates
+
 
 LOGGER_NAME = "pyra.debug.current_game"
 _HOOKS_INSTALLED = False
 
 
-# Function: _data_dir - Retourne le dossier de donnees de l'application.
-def _data_dir() -> Path:
-    base = Path(os.getenv("APPDATA", Path.home()))
-    directory = base / "PyRA"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
 # Function: debug_log_path_candidates - Retourne les emplacements possibles pour debug.log.
 def debug_log_path_candidates() -> list[Path]:
-    # Chemin unique pour éviter toute confusion entre mode source et exécutable.
-    return [_data_dir() / "debug.log"]
+    return app_debug_log_path_candidates()
 
 
 # Function: get_debug_logger - Retourne un logger configure vers le fichier debug.log.

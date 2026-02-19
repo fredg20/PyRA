@@ -1,39 +1,54 @@
-# PyRA - Suivi RetroAchievements
+﻿# PyRA - Suivi RetroAchievements
 
 PyRA est une application desktop (Python/Tkinter) pour suivre un compte RetroAchievements sans passer par un navigateur.
 
 Version actuelle: `0.9.0-beta.3`
 
-## Fonctionnalités actuelles
+## FonctionnalitÃ©s actuelles
 
-- Connexion API RetroAchievements (clé API + nom d'utilisateur API).
+- Connexion API RetroAchievements (clÃ© API + nom d'utilisateur API).
 - Synchronisation automatique du tableau de bord.
-- Détection d'état en temps réel:
-  - `Inactif` si aucun émulateur compatible n'est chargé.
-  - `Émulateur chargé` dès qu'un émulateur compatible est détecté.
-  - `Jeu chargé` dès qu'un jeu actif est détecté côté émulateur.
-  - Retour à `Émulateur chargé` quand le jeu se ferme (émulateur encore ouvert).
-  - Retour à `Inactif` quand l'émulateur se ferme.
+- DÃ©tection d'Ã©tat en temps rÃ©el:
+  - `Inactif` si aucun Ã©mulateur compatible n'est chargÃ©.
+  - `Ã‰mulateur chargÃ©` dÃ¨s qu'un Ã©mulateur compatible est dÃ©tectÃ©.
+  - `Jeu chargÃ©` dÃ¨s qu'un jeu actif est dÃ©tectÃ© cÃ´tÃ© Ã©mulateur.
+  - Retour Ã  `Ã‰mulateur chargÃ©` quand le jeu se ferme (Ã©mulateur encore ouvert).
+  - Retour Ã  `Inactif` quand l'Ã©mulateur se ferme.
 - Onglet `Jeu en cours`:
-  - résumé du jeu (titre, console, progression, dernier succès),
-  - section `Succès à débloquer` avec badge, description et navigation,
-  - ordre des succès verrouillés: `Normal`, `Facile -> Difficile`, `Difficile -> Facile`,
-  - galerie des succès du jeu avec défilement automatique.
-- Interface `Light | Dark`, style visuel unifié, coins arrondis harmonisés.
-- Sauvegarde/restauration de la géométrie de fenêtre.
+  - rÃ©sumÃ© du jeu (titre, console, progression, dernier succÃ¨s),
+  - section `SuccÃ¨s Ã  dÃ©bloquer` avec badge, description et navigation,
+  - ordre des succÃ¨s verrouillÃ©s: `Normal`, `Facile -> Difficile`, `Difficile -> Facile`,
+  - galerie des succÃ¨s du jeu avec dÃ©filement automatique.
+- Interface `Light | Dark`, style visuel unifiÃ©, coins arrondis harmonisÃ©s.
+- Sauvegarde/restauration de la gÃ©omÃ©trie de fenÃªtre.
 
 ## Sections en maintenance
 
 - `Progression par jeu`
-- `Succès récents`
-- Fenêtre `Profil` (accessible, mais encore en maintenance)
+- `SuccÃ¨s rÃ©cents`
+- FenÃªtre `Profil` (accessible, mais encore en maintenance)
 
-## Prérequis
+## PrÃ©requis
 
 - Windows
 - Python 3.10+
 - Connexion Internet
-- Clé API RetroAchievements
+- ClÃ© API RetroAchievements
+
+## Périmètre émulateurs supportés
+
+PyRA cible un usage desktop Windows. La détection d'état émulateur/jeu est
+limitée aux émulateurs pertinents pour ce contexte.
+
+Hors périmètre pour ce projet:
+
+- Émulateurs Android uniquement
+- Émulateurs mobiles uniquement (Android/iOS)
+- Émulateurs UWP/Xbox
+- Émulateurs non retenus pour le scope actuel
+
+Ce choix est volontaire pour garder une détection stable, rapide et
+maintenable dans PyRA.
 
 ## Installation (source)
 
@@ -49,18 +64,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Au premier démarrage:
+Au premier dÃ©marrage:
 
 1. Ouvrir `Connexion`
-2. Saisir la clé API
+2. Saisir la clÃ© API
 3. Saisir le nom d'utilisateur API
 4. Cliquer sur `Enregistrer`
 
 ## Rich Presence (important)
 
-Pour que PyRA détecte correctement l'activité en cours, activez **Rich Presence** dans l'émulateur.
+Pour que PyRA dÃ©tecte correctement l'activitÃ© en cours, activez **Rich Presence** dans l'Ã©mulateur.
 
-Exemples fréquents:
+Exemples frÃ©quents:
 
 - DuckStation: `Tools` > `Achievements`
 - PCSX2: `Tools` > `Achievements`
@@ -68,7 +83,7 @@ Exemples fréquents:
 - BizHawk: `Tools` > `RetroAchievements`
 - PPSSPP: `Settings` > `Tools` > `Achievements`
 
-## Générer l'exécutable `.exe`
+## GÃ©nÃ©rer l'exÃ©cutable `.exe`
 
 ```powershell
 .venv\Scripts\Activate.ps1
@@ -79,16 +94,18 @@ Sortie:
 
 - `dist\PyRA.exe`
 
-## Données locales
+## DonnÃ©es locales
 
 - Configuration: `%APPDATA%\PyRA\config.json`
 - Base SQLite: `%APPDATA%\PyRA\tracker.db`
 - Cache jeu en cours: `%APPDATA%\PyRA\current_game_cache.json`
 - Journal debug: `%APPDATA%\PyRA\debug.log`
 
-## Variables d'environnement supportées
+## Variables d'environnement supportÃ©es
 
 - `RA_API_KEY`
 - `RA_API_USERNAME`
 - `TRACKED_USERNAME`
 - `TRACKER_DB_PATH`
+
+
