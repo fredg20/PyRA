@@ -196,7 +196,7 @@ def save_snapshot(db_path: str, snapshot: dict[str, Any]) -> None:
                     _to_int(entry.get("AchievementID") or entry.get("ID")),
                     _to_int(entry.get("GameID")),
                     str(entry.get("GameTitle", "")),
-                    str(entry.get("Title", "Succes inconnu")),
+                    str(entry.get("Title", "Succès inconnu")),
                     _to_int(entry.get("Points")),
                     int(bool(entry.get("HardcoreMode"))),
                     str(entry.get("DateAwarded") or entry.get("Date", "")),

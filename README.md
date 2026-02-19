@@ -1,37 +1,39 @@
-# PyRA - RetroAchievements Tracker
+# PyRA - Suivi RetroAchievements
 
-PyRA est une application desktop (Python/Tkinter) pour suivre un compte RetroAchievements, sans passer par une page web.
+PyRA est une application desktop (Python/Tkinter) pour suivre un compte RetroAchievements sans passer par un navigateur.
 
-## Fonctionnalites
+Version actuelle: `0.9.0-beta.3`
 
-- Fenetre de connexion (cle API + nom d'utilisateur API)
-- Synchronisation automatique apres connexion
-- Detection d'emulateur compatible RA (`Live` ou `Inactif ou inconnu`)
-- Onglet `Jeu en cours` avec:
-  - resume du jeu (titre, console, progression, dernier succes)
-  - premier succes non debloque
-  - galerie des succes du jeu en cours avec infobulles
-- Mode `Light | Dark`
-- Interface responsive
-- Sauvegarde de la position de la fenetre
+## Fonctionnalités actuelles
 
-## Elements en maintenance
+- Connexion API RetroAchievements (clé API + nom d'utilisateur API).
+- Synchronisation automatique du tableau de bord.
+- Détection d'état en temps réel:
+  - `Inactif` si aucun émulateur compatible n'est chargé.
+  - `Émulateur chargé` dès qu'un émulateur compatible est détecté.
+  - `Jeu chargé` dès qu'un jeu actif est détecté côté émulateur.
+  - Retour à `Émulateur chargé` quand le jeu se ferme (émulateur encore ouvert).
+  - Retour à `Inactif` quand l'émulateur se ferme.
+- Onglet `Jeu en cours`:
+  - résumé du jeu (titre, console, progression, dernier succès),
+  - section `Succès à débloquer` avec badge, description et navigation,
+  - ordre des succès verrouillés: `Normal`, `Facile -> Difficile`, `Difficile -> Facile`,
+  - galerie des succès du jeu avec défilement automatique.
+- Interface `Light | Dark`, style visuel unifié, coins arrondis harmonisés.
+- Sauvegarde/restauration de la géométrie de fenêtre.
+
+## Sections en maintenance
 
 - `Progression par jeu`
-- `Succes recents`
-- `Profil` (bouton + entree dans `Fichier`)
+- `Succès récents`
+- Fenêtre `Profil` (accessible, mais encore en maintenance)
 
-## TODO
-
-- Corriger et etendre la traduction des descriptions de succes (qualite inegale et non appliquee partout).
-- Ajouter un bouton d'ordre des succes avec 3 modes: `Normal`, `Easy -> Hard` (base sur la faisabilite, uniquement sur les succes non debloques), `Hard -> Easy` (base sur la faisabilite, uniquement sur les succes non debloques). Regle a conserver: `succes non debloques` en premier.
-
-## Prerequis
+## Prérequis
 
 - Windows
 - Python 3.10+
 - Connexion Internet
-- Cle API RetroAchievements
+- Clé API RetroAchievements
 
 ## Installation (source)
 
@@ -47,34 +49,26 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Au premier demarrage:
+Au premier démarrage:
 
 1. Ouvrir `Connexion`
-2. Saisir la cle API
+2. Saisir la clé API
 3. Saisir le nom d'utilisateur API
 4. Cliquer sur `Enregistrer`
 
-La synchronisation demarre ensuite automatiquement.
-
 ## Rich Presence (important)
 
-Pour que PyRA detecte correctement l'activite en cours (`Live`), il faut activer le **Rich Presence** dans l'emulateur.
+Pour que PyRA détecte correctement l'activité en cours, activez **Rich Presence** dans l'émulateur.
 
-Emplacements les plus courants:
+Exemples fréquents:
 
-- DuckStation: `Tools` > `Achievements` (activer Rich Presence)
-- PCSX2: `Tools` > `Achievements` (activer Rich Presence)
-- Dolphin: `Tools` > `Achievements` (activer Rich Presence)
-- BizHawk: `Tools` > `RetroAchievements` (activer Rich Presence)
-- PPSSPP: `Settings` > `Tools` > `Achievements` (activer Rich Presence)
+- DuckStation: `Tools` > `Achievements`
+- PCSX2: `Tools` > `Achievements`
+- Dolphin: `Tools` > `Achievements`
+- BizHawk: `Tools` > `RetroAchievements`
+- PPSSPP: `Settings` > `Tools` > `Achievements`
 
-Pour les autres emulateurs compatibles RetroAchievements:
-
-- Ouvrir les parametres `Achievements` ou `RetroAchievements`
-- Activer `Rich Presence`
-- Verifier que vous etes connecte au meme compte RetroAchievements que dans PyRA
-
-## Generer l'executable `.exe`
+## Générer l'exécutable `.exe`
 
 ```powershell
 .venv\Scripts\Activate.ps1
@@ -85,12 +79,14 @@ Sortie:
 
 - `dist\PyRA.exe`
 
-## Donnees locales
+## Données locales
 
 - Configuration: `%APPDATA%\PyRA\config.json`
 - Base SQLite: `%APPDATA%\PyRA\tracker.db`
+- Cache jeu en cours: `%APPDATA%\PyRA\current_game_cache.json`
+- Journal debug: `%APPDATA%\PyRA\debug.log`
 
-## Variables d'environnement supportees
+## Variables d'environnement supportées
 
 - `RA_API_KEY`
 - `RA_API_USERNAME`

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import inspect
@@ -285,6 +285,22 @@ class AchievementMixin:
 
         return "Inconnue"
 
+    # Method: _compute_achievement_difficulty_score - Retourne un score numérique (plus bas = plus facile) pour trier les succès.
+    def _compute_achievement_difficulty_score(
+        self,
+        awarded: int,
+        total_players: int,
+        true_ratio_value: float | None,
+    ) -> tuple[bool, float]:
+        if total_players > 0 and awarded >= 0:
+            unlock_pct = (awarded * 100.0) / max(1, total_players)
+            return True, max(0.0, min(100.0, 100.0 - unlock_pct))
+
+        if true_ratio_value is not None and true_ratio_value > 0:
+            return True, min(999.0, true_ratio_value)
+
+        return False, 9999.0
+
     # Method: _build_next_achievement_summary - Prépare les champs de la section du premier succès non débloqué.
     def _build_next_achievement_summary(
         self,
@@ -297,7 +313,6 @@ class AchievementMixin:
         if translate_description:
             description = self._translate_achievement_description_to_french(description)
         points = self._safe_int(achievement.get("Points"))
-        true_ratio = self._safe_text(achievement.get("TrueRatio")) or "N/A"
         true_ratio_value = self._safe_float(achievement.get("TrueRatio"))
         awarded = self._safe_int(achievement.get("NumAwarded"))
         awarded_hardcore = self._safe_int(achievement.get("NumAwardedHardcore"))
@@ -305,7 +320,7 @@ class AchievementMixin:
         return {
             "title": title,
             "description": description,
-            "points": f"{points} points | True ratio: {true_ratio}",
-            "unlocks": f"Global: {awarded} | Hardcore: {awarded_hardcore}",
+            "points": f"{points} points",
+            "unlocks": f"{awarded} | {awarded_hardcore}",
             "feasibility": feasibility,
         }

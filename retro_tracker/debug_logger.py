@@ -23,23 +23,8 @@ def _data_dir() -> Path:
 
 # Function: debug_log_path_candidates - Retourne les emplacements possibles pour debug.log.
 def debug_log_path_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / "debug.log")
-    else:
-        candidates.append(Path(__file__).resolve().parents[1] / "debug.log")
-    candidates.append(Path.cwd() / "debug.log")
-    candidates.append(_data_dir() / "debug.log")
-
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate.resolve())
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(candidate)
-    return deduped
+    # Chemin unique pour éviter toute confusion entre mode source et exécutable.
+    return [_data_dir() / "debug.log"]
 
 
 # Function: get_debug_logger - Retourne un logger configure vers le fichier debug.log.

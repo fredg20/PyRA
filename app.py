@@ -28,8 +28,8 @@ from retro_tracker.mixins import AchievementMixin, ParsingMixin
 from retro_tracker.ra_api import RetroAPIError, RetroAchievementsClient
 
 
-APP_NAME = "PyRA - RetroAchievements Tracker"
-APP_VERSION = "0.9.0-beta.2"
+APP_NAME = "PyRA - Suivi RetroAchievements"
+APP_VERSION = "0.9.0-beta.3"
 THEME_MODES = {"light", "dark"}
 AUTO_SYNC_INTERVAL_MS = 60_000
 EVENT_SYNC_DELAY_MS = 120
@@ -38,18 +38,51 @@ EMULATOR_POLL_IMMEDIATE_INTERVAL_MS = 120
 EMULATOR_STATE_CONFIRMATION_COUNT = 1
 EMULATOR_STATUS_REFRESH_DEBOUNCE_MS = 60
 EMULATOR_STATUS_REFRESH_MIN_GAP_MS = 180
-LIVE_RICH_PRESENCE_MAX_AGE_SECONDS = 75
-LIVE_RECENT_PLAYED_MAX_AGE_SECONDS = 75
-EVENT_SYNC_LIVE_MIN_GAP_MS = 750
-EVENT_SYNC_IDLE_MIN_GAP_MS = 4_000
+LIVE_RICH_PRESENCE_MAX_AGE_SECONDS = 20 * 60
+LIVE_RECENT_PLAYED_MAX_AGE_SECONDS = 20 * 60
+# Fenêtre stricte pour la détection "recent_fallback" afin de revenir vite à "Émulateur chargé" après fermeture du jeu.
+LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS = 20
+# Polling événementiel live plus réactif (reste borné pour éviter les rafales API).
+EVENT_SYNC_LIVE_MIN_GAP_MS = 3_000
+EVENT_SYNC_IDLE_MIN_GAP_MS = 18_000
 CURRENT_GAME_LOADING_OVERLAY_MAX_MS = 25_000
-IMAGE_FETCH_TIMEOUT_SECONDS = 6
-MAX_ACHIEVEMENT_BADGE_FETCH = 28
+SAVED_WINDOW_GEOMETRY_RETRY_DELAY_MS = 160
+SAVED_WINDOW_GEOMETRY_RETRY_COUNT = 3
+IMAGE_FETCH_TIMEOUT_SECONDS = 3
+MAX_ACHIEVEMENT_BADGE_FETCH = 4
+PROBE_LOG_PREFIX = "PROBE"
+NEXT_ACHIEVEMENT_BADGE_MAX_SIZE = 124
 ACHIEVEMENT_NA_VALUE = "N/A"
 EMULATOR_STATUS_INACTIVE = "Inactif"
 EMULATOR_STATUS_EMULATOR_LOADED = "Émulateur chargé"
 EMULATOR_STATUS_GAME_LOADED = "Jeu chargé"
 ACHIEVEMENT_SCROLL_INTERVAL_MS = 75
+ACHIEVEMENT_ORDER_NORMAL = "normal"
+ACHIEVEMENT_ORDER_EASY_TO_HARD = "easy_to_hard"
+ACHIEVEMENT_ORDER_HARD_TO_EASY = "hard_to_easy"
+ACHIEVEMENT_ORDER_CYCLE = (
+    ACHIEVEMENT_ORDER_NORMAL,
+    ACHIEVEMENT_ORDER_EASY_TO_HARD,
+    ACHIEVEMENT_ORDER_HARD_TO_EASY,
+)
+ACHIEVEMENT_ORDER_LABELS = {
+    ACHIEVEMENT_ORDER_NORMAL: "Ordre: Normal",
+    ACHIEVEMENT_ORDER_EASY_TO_HARD: "Ordre: Facile -> Difficile",
+    ACHIEVEMENT_ORDER_HARD_TO_EASY: "Ordre: Difficile -> Facile",
+}
+ACHIEVEMENT_CLICK_PREVIEW_MS = 10_000
+ACHIEVEMENT_CLICK_DOUBLE_WINDOW_SECONDS = 1.2
+NOTEBOOK_TAB_SECTION_GAP = 10
+MAIN_TAB_CURRENT = "current"
+MAIN_TAB_GAMES = "games"
+MAIN_TAB_RECENT = "recent"
+MAIN_TAB_ORDER = (MAIN_TAB_CURRENT, MAIN_TAB_GAMES, MAIN_TAB_RECENT)
+MAIN_TAB_LABELS = {
+    MAIN_TAB_CURRENT: "Jeu en cours",
+    MAIN_TAB_GAMES: "Progression par jeu",
+    MAIN_TAB_RECENT: "Succès récents",
+}
+MAIN_TAB_MAINTENANCE_KEYS = {MAIN_TAB_GAMES, MAIN_TAB_RECENT}
 WINDOW_GEOMETRY_RE = re.compile(r"^\d+x\d+[+-]\d+[+-]\d+$")
 EMULATOR_PROCESS_HINTS = (
     "retroarch",
@@ -71,10 +104,11 @@ EMULATOR_PROCESS_HINTS = (
 )
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND_SMALL = 3
-DEFAULT_WIDGET_CORNER_RADIUS = 7
-COVER_IMAGE_CORNER_RADIUS = 16
-BADGE_IMAGE_CORNER_RADIUS = 12
-ACHIEVEMENT_IMAGE_CORNER_RADIUS = 9
+UNIFIED_CORNER_RADIUS = 10
+DEFAULT_WIDGET_CORNER_RADIUS = UNIFIED_CORNER_RADIUS
+COVER_IMAGE_CORNER_RADIUS = UNIFIED_CORNER_RADIUS
+BADGE_IMAGE_CORNER_RADIUS = UNIFIED_CORNER_RADIUS
+ACHIEVEMENT_IMAGE_CORNER_RADIUS = UNIFIED_CORNER_RADIUS
 IMAGE_ROUNDING_INSET = 1
 
 if os.name == "nt":
@@ -128,21 +162,8 @@ def current_game_cache_path() -> Path:
 
 # Function: debug_log_path_candidates - Retourne les emplacements possibles pour le fichier de journal de débogage.
 def debug_log_path_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / "debug.log")
-    else:
-        candidates.append(Path(__file__).resolve().parent / "debug.log")
-    candidates.append(data_dir() / "debug.log")
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate.resolve())
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(candidate)
-    return deduped
+    # Chemin unique pour le debug, commun au mode source et à l'exécutable.
+    return [data_dir() / "debug.log"]
 
 
 # Class: TrackerApp - Orchestre l'interface, la synchronisation et les interactions utilisateur.
@@ -186,6 +207,10 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.current_game_next_achievement_unlocks = StringVar(value=ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_feasibility = StringVar(value=ACHIEVEMENT_NA_VALUE)
         self.current_game_achievements_note = StringVar(value="Aucun succès à afficher.")
+        self.current_game_achievement_order_mode = ACHIEVEMENT_ORDER_NORMAL
+        self.current_game_achievement_order_label = StringVar(
+            value=ACHIEVEMENT_ORDER_LABELS[ACHIEVEMENT_ORDER_NORMAL]
+        )
 
         self.sync_button: ttk.Button | None = None
         self.refresh_button: ttk.Button | None = None
@@ -210,11 +235,16 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.game_tree: ttk.Treeview | None = None
         self.recent_tree: ttk.Treeview | None = None
         self.main_tabs: ttk.Notebook | None = None
+        self.main_tab_button_bar: ttk.Frame | None = None
+        self.main_tab_buttons: dict[str, ttk.Button] = {}
+        self.main_tab_frames: dict[str, ttk.Frame] = {}
+        self.main_tab_selected_key = MAIN_TAB_CURRENT
         self.current_game_info_tree: ttk.Treeview | None = None
         self.current_game_title_value_label: ttk.Label | None = None
         self.current_game_next_achievement_desc_label: ttk.Label | None = None
         self.current_game_previous_achievement_button: ttk.Button | None = None
         self.current_game_next_achievement_button: ttk.Button | None = None
+        self.current_game_achievement_order_button: ttk.Button | None = None
         self.current_game_source_value_label: ttk.Label | None = None
         self.current_game_tab_container: ttk.Frame | None = None
         self.current_game_loading_overlay: Canvas | None = None
@@ -233,6 +263,11 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.current_game_achievement_data: list[dict[str, str]] = []
         self.current_game_locked_achievements: list[dict[str, str]] = []
         self.current_game_locked_achievement_index = 0
+        self.current_game_clicked_achievement_key = ""
+        self.current_game_clicked_achievement_persistent = False
+        self.current_game_clicked_achievement_restore_job: str | None = None
+        self.current_game_last_clicked_achievement_key = ""
+        self.current_game_last_clicked_achievement_click_monotonic = 0.0
         self.current_game_achievement_refs: dict[str, PhotoImage] = {}
         self.current_game_badge_loader_token = 0
         self.current_game_badge_loader_in_progress = False
@@ -261,6 +296,9 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._last_modal_anchor: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.style = ttk.Style(self.root)
         self.theme_colors: dict[str, str] = {}
+        self._notebook_tab_image_normal: PhotoImage | None = None
+        self._notebook_tab_image_selected: PhotoImage | None = None
+        self._notebook_tab_image_disabled: PhotoImage | None = None
         self._tree_column_types: dict[str, dict[str, str]] = {}
         self._tree_headings: dict[str, dict[str, str]] = {}
         self._tree_sort_state: dict[str, tuple[str, bool]] = {}
@@ -277,6 +315,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._current_game_details_cache: dict[tuple[str, int], dict[str, object]] = {}
         self._current_game_images_cache: dict[tuple[str, int], dict[str, bytes]] = {}
         self._image_bytes_cache: dict[str, bytes] = {}
+        self._achievement_translation_pending: dict[str, bool] = {}
+        self._achievement_translation_lock = threading.Lock()
         self._http_session = requests.Session()
         self.sync_in_progress = False
         self.auto_sync_job: str | None = None
@@ -286,11 +326,15 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.startup_init_job: str | None = None
         self.startup_finish_job: str | None = None
         self.startup_connection_job: str | None = None
+        self.saved_window_geometry_apply_job: str | None = None
+        self._saved_window_geometry_pending = ""
+        self._saved_window_geometry_retry_remaining = 0
         self.emulator_poll_job: str | None = None
         self.emulator_status_refresh_job: str | None = None
         self.emulator_probe_in_progress = False
         self._emulator_probe_candidate_live: bool | None = None
         self._emulator_probe_candidate_count = 0
+        self._last_emulator_probe_live = False
         self._pending_inactive_transition_after_game_loaded = False
         self._pending_emulator_status_force_refresh = False
         self._last_emulator_status_refresh_monotonic = 0.0
@@ -304,6 +348,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.is_closing = False
         self.debug_logger: logging.Logger | None = None
         self.debug_log_file = ""
+        probes_flag = os.getenv("PYRA_PROBES", "1").strip().casefold()
+        self.probes_enabled = probes_flag not in {"0", "false", "off", "no"}
 
         self._setup_debug_logger()
 
@@ -369,7 +415,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.startup_init_job = None
         if self.is_closing:
             return
-        self._set_startup_loader_progress(20, "Chargement des donnees locales...")
+        self._set_startup_loader_progress(20, "Chargement des données locales...")
         self.refresh_dashboard(show_errors=False, sync_before_refresh=False)
         if self.is_closing:
             return
@@ -377,12 +423,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._request_event_sync("démarrage", delay_ms=450)
         if self.is_closing:
             return
-        self._set_startup_loader_progress(80, "Verification de l'emulateur...")
+        self._set_startup_loader_progress(80, "Vérification de l'émulateur...")
         self._prime_emulator_status_on_startup()
         self._restart_emulator_probe(immediate=True)
         if self.is_closing:
             return
-        self._set_startup_loader_progress(100, "Initialisation terminee.")
+        self._set_startup_loader_progress(100, "Initialisation terminée.")
         self.startup_finish_job = self.root.after(180, self._finish_startup_sequence)
 
     # Method: _finish_startup_sequence - Termine l'initialisation et ouvre la connexion si necessaire.
@@ -391,7 +437,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if self.is_closing:
             return
         self._hide_startup_loader()
-        self.status_text.set("Pret")
+        self.status_text.set("Prêt")
         self.startup_connection_job = self.root.after(120, self._open_connection_if_missing)
 
     # Method: _setup_debug_logger - Initialise le fichier debug.log pour diagnostiquer les problèmes d'affichage.
@@ -415,6 +461,26 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             logger.info(message)
         except Exception:
             return
+
+    # Method: _probe - Écrit une sonde structurée dans debug.log pour diagnostiquer les transitions d'état.
+    def _probe(self, name: str, **fields: object) -> None:
+        if not self.probes_enabled:
+            return
+        parts: list[str] = []
+        for key in sorted(fields.keys()):
+            value = fields.get(key)
+            if isinstance(value, str):
+                text = " ".join(value.split())
+            else:
+                text = str(value)
+            text = text.replace("|", "/")
+            if len(text) > 180:
+                text = f"{text[:177]}..."
+            parts.append(f"{key}={text}")
+        if parts:
+            self._debug_log(f"{PROBE_LOG_PREFIX} {name} | " + " | ".join(parts))
+            return
+        self._debug_log(f"{PROBE_LOG_PREFIX} {name}")
 
     # Method: _on_tk_callback_exception - Journalise les exceptions Tk non gerees.
     def _on_tk_callback_exception(
@@ -736,10 +802,20 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _is_emulator_live(self) -> bool:
         return self._is_emulator_live_status_text(self.emulator_status_text.get())
 
+    # Method: _is_emulator_process_live - Retourne le dernier état détecté des processus émulateur.
+    def _is_emulator_process_live(self) -> bool:
+        return bool(self._last_emulator_probe_live)
+
     # Method: _set_emulator_status_text - Met à jour le libellé du statut sans déclencher de logique métier.
     def _set_emulator_status_text(self, status_text: str) -> None:
+        previous = self.emulator_status_text.get().strip()
         self.emulator_status_text.set(status_text)
         self._refresh_emulator_status_tab()
+        if previous != status_text:
+            self._probe("status_text_change", previous=previous or "-", new=status_text)
+            if not self.is_closing:
+                # Garantit une actualisation après chaque transition de mode.
+                self._schedule_emulator_status_refresh(force_current_game_refresh=False)
 
     # Method: _prime_emulator_status_on_startup - Initialise l'état Live/Inactif dès l'ouverture de l'application.
     def _prime_emulator_status_on_startup(self) -> None:
@@ -748,6 +824,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             is_live = self._detect_ra_emulator_live()
         except Exception:
             is_live = False
+        self._last_emulator_probe_live = is_live
         next_status = EMULATOR_STATUS_EMULATOR_LOADED if is_live else EMULATOR_STATUS_INACTIVE
         self._set_emulator_status_text(next_status)
         self._emulator_probe_candidate_live = None
@@ -757,23 +834,14 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: _set_emulator_status - Met à jour le statut Live/Inactif affiché près du sélecteur de thème.
     def _set_emulator_status(self, is_live: bool) -> None:
         previous = self.emulator_status_text.get().strip()
-        previous_lower = previous.casefold()
         if is_live:
             next_status = EMULATOR_STATUS_EMULATOR_LOADED
             self._pending_inactive_transition_after_game_loaded = False
         else:
-            if previous_lower == EMULATOR_STATUS_GAME_LOADED.casefold():
-                next_status = EMULATOR_STATUS_EMULATOR_LOADED
-                self._pending_inactive_transition_after_game_loaded = True
-            elif (
-                self._pending_inactive_transition_after_game_loaded
-                and previous_lower == EMULATOR_STATUS_EMULATOR_LOADED.casefold()
-            ):
-                next_status = EMULATOR_STATUS_INACTIVE
-                self._pending_inactive_transition_after_game_loaded = False
-            else:
-                next_status = EMULATOR_STATUS_INACTIVE
-                self._pending_inactive_transition_after_game_loaded = False
+            # Règle demandée: fermeture émulateur => Inactif immédiatement,
+            # même si l'état précédent était "Jeu chargé".
+            next_status = EMULATOR_STATUS_INACTIVE
+            self._pending_inactive_transition_after_game_loaded = False
         self._set_emulator_status_text(next_status)
         if previous != next_status and not self.is_closing:
             self._debug_log(f"_set_emulator_status transition '{previous}' -> '{next_status}'")
@@ -885,9 +953,17 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: _on_emulator_probe_result - Applique le résultat de détection et relance le polling.
     def _on_emulator_probe_result(self, is_live: bool) -> None:
         self.emulator_probe_in_progress = False
+        self._last_emulator_probe_live = is_live
         status_before = self.emulator_status_text.get().strip().casefold()
         fast_reprobe_needed = False
         current_live = self._is_emulator_live()
+        self._probe(
+            "emulator_probe_result",
+            detected_live=is_live,
+            current_live=current_live,
+            status_before=status_before,
+            candidate_count=self._emulator_probe_candidate_count,
+        )
         if is_live == current_live:
             self._emulator_probe_candidate_live = None
             self._emulator_probe_candidate_count = 0
@@ -901,26 +977,30 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 self._emulator_probe_candidate_live = None
                 self._emulator_probe_candidate_count = 0
                 self._set_emulator_status(is_live)
-                fast_reprobe_needed = (
-                    (not is_live and self._pending_inactive_transition_after_game_loaded)
-                    or is_live
-                )
+                fast_reprobe_needed = is_live
 
-        effective_live = self._is_emulator_live()
+        effective_live = self._is_emulator_process_live()
         if self._has_valid_connection():
             ui_status = self.emulator_status_text.get().strip().casefold()
             if ui_status == EMULATOR_STATUS_GAME_LOADED.casefold():
-                min_gap_ms = max(300, EVENT_SYNC_LIVE_MIN_GAP_MS // 2)
+                min_gap_ms = EVENT_SYNC_LIVE_MIN_GAP_MS
             else:
                 min_gap_ms = EVENT_SYNC_LIVE_MIN_GAP_MS if effective_live else EVENT_SYNC_IDLE_MIN_GAP_MS
             self._request_event_sync_throttled(
                 "surveillance changements",
-                delay_ms=0,
+                delay_ms=120,
                 min_gap_ms=min_gap_ms,
             )
         status_after = self.emulator_status_text.get().strip().casefold()
         if status_before != status_after and status_after == EMULATOR_STATUS_EMULATOR_LOADED.casefold():
             fast_reprobe_needed = True
+        self._probe(
+            "emulator_probe_apply",
+            status_before=status_before,
+            status_after=status_after,
+            fast_reprobe=fast_reprobe_needed,
+            effective_live=effective_live,
+        )
         self._restart_emulator_probe(immediate=fast_reprobe_needed)
 
     # Method: _build_menu - Construit les composants d'interface concernés.
@@ -956,7 +1036,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         )
         file_menu.add_separator()
         file_menu.add_command(label="Ouvrir le dossier des données", command=self.open_data_folder)
-        file_menu.add_command(label="Ouvrir dossier de la base", command=self.open_db_folder)
+        file_menu.add_command(label="Ouvrir le dossier de la base", command=self.open_db_folder)
         file_menu.add_separator()
         file_menu.add_command(
             label="Quitter",
@@ -1006,49 +1086,10 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.profile_button.bind("<Enter>", self._on_profile_button_enter)
         self.profile_button.bind("<Motion>", self._on_profile_button_motion)
         self.profile_button.bind("<Leave>", self._on_profile_button_leave)
-        self.summary_label = ttk.Label(self.top_bar, textvariable=self.connection_summary)
-        self.summary_label.grid(row=0, column=2, padx=(6, 0), sticky=W)
         self.theme_toggle_frame = ttk.Frame(self.top_bar)
-        self.theme_toggle_frame.grid(row=0, column=3, padx=(0, 0), sticky="e")
-        self.theme_light_label = ttk.Label(self.theme_toggle_frame, text="Light", style="ThemeToggle.TLabel", cursor="hand2")
-        self.theme_light_label.grid(row=0, column=0, sticky=W)
-        self.theme_light_label.bind("<Button-1>", lambda _event: self._set_theme("light"))
-        self.theme_separator_label = ttk.Label(self.theme_toggle_frame, text=" | ", style="ThemeToggleSep.TLabel")
-        self.theme_separator_label.grid(row=0, column=1, sticky=W)
-        self.theme_dark_label = ttk.Label(self.theme_toggle_frame, text="Dark", style="ThemeToggle.TLabel", cursor="hand2")
-        self.theme_dark_label.grid(row=0, column=2, sticky=W)
-        self.theme_dark_label.bind("<Button-1>", lambda _event: self._set_theme("dark"))
-
-        content = ttk.Frame(self.root)
-        content.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        content.columnconfigure(0, weight=1)
-        content.rowconfigure(0, weight=1)
-        tabs_row = ttk.Frame(content)
-        tabs_row.grid(row=0, column=0, sticky="nsew")
-        tabs_row.columnconfigure(0, weight=1)
-        tabs_row.rowconfigure(0, weight=1)
-
-        tabs = ttk.Notebook(tabs_row, style="Borderless.TNotebook")
-        tabs.grid(row=0, column=0, sticky="nsew")
-        self.main_tabs = tabs
-        tabs.bind("<Motion>", self._on_main_tabs_motion)
-        tabs.bind("<Leave>", self._on_main_tabs_leave)
-        games_tab = ttk.Frame(tabs)
-        recent_tab = ttk.Frame(tabs)
-        current_tab = ttk.Frame(tabs)
-        games_tab.rowconfigure(0, weight=1)
-        games_tab.columnconfigure(0, weight=1)
-        recent_tab.rowconfigure(0, weight=1)
-        recent_tab.columnconfigure(0, weight=1)
-        current_tab.rowconfigure(0, weight=1)
-        current_tab.columnconfigure(0, weight=1)
-        tabs.add(current_tab, text="Jeu en cours")
-        tabs.add(games_tab, text="Progression par jeu", state="disabled")
-        tabs.add(recent_tab, text="Succès récents", state="disabled")
-        tabs.select(current_tab)
-        status_tab = ttk.Frame(tabs_row, style="StatusTab.TFrame", padding=(12, 6, 12, 5))
-        status_tab.place(in_=tabs_row, relx=1.0, x=0, y=0, anchor="ne")
-        status_tab.lift()
+        self.theme_toggle_frame.grid(row=0, column=2, padx=(0, 8), sticky="e")
+        status_tab = ttk.Frame(self.theme_toggle_frame, style="StatusTab.TFrame", padding=(12, 6, 12, 5))
+        status_tab.grid(row=0, column=0, padx=(0, 8), sticky=W)
         self.emulator_status_tab = status_tab
         self.emulator_status_label = ttk.Label(
             status_tab,
@@ -1060,9 +1101,78 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.emulator_status_label.grid(row=0, column=0, sticky="nsew")
         status_tab.bind("<Button-1>", lambda _event: "break")
         self.emulator_status_label.bind("<Button-1>", lambda _event: "break")
+        theme_mode_frame = ttk.Frame(self.theme_toggle_frame, style="MainTabBar.TFrame", padding=(0, 6, 0, 5))
+        theme_mode_frame.grid(row=0, column=1, sticky=W)
+        self.theme_light_label = ttk.Label(theme_mode_frame, text="Clair", style="ThemeToggle.TLabel", cursor="hand2")
+        self.theme_light_label.grid(row=0, column=0, sticky=W)
+        self.theme_light_label.bind("<Button-1>", lambda _event: self._set_theme("light"))
+        self.theme_separator_label = ttk.Label(theme_mode_frame, text=" | ", style="ThemeToggleSep.TLabel")
+        self.theme_separator_label.grid(row=0, column=1, sticky=W)
+        self.theme_dark_label = ttk.Label(theme_mode_frame, text="Sombre", style="ThemeToggle.TLabel", cursor="hand2")
+        self.theme_dark_label.grid(row=0, column=2, sticky=W)
+        self.theme_dark_label.bind("<Button-1>", lambda _event: self._set_theme("dark"))
+
+        content = ttk.Frame(self.root)
+        content.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+        tabs_row = ttk.Frame(content)
+        tabs_row.grid(row=0, column=0, sticky="nsew")
+        tabs_row.columnconfigure(0, weight=1)
+        tabs_row.rowconfigure(0, weight=0)
+        tabs_row.rowconfigure(1, weight=1)
+
+        tabs_header = ttk.Frame(tabs_row, style="MainTabBar.TFrame")
+        tabs_header.grid(row=0, column=0, sticky="ew", pady=(0, NOTEBOOK_TAB_SECTION_GAP))
+        tabs_header.columnconfigure(0, weight=1)
+
+        tab_button_bar = ttk.Frame(tabs_header, style="MainTabBar.TFrame")
+        tab_button_bar.grid(row=0, column=0, sticky="w")
+        self.main_tab_button_bar = tab_button_bar
+        self.main_tabs = None
+
+        tabs_content = ttk.Frame(tabs_row, style="CurrentTab.TFrame")
+        tabs_content.grid(row=1, column=0, sticky="nsew")
+        tabs_content.columnconfigure(0, weight=1)
+        tabs_content.rowconfigure(0, weight=1)
+
+        games_tab = ttk.Frame(tabs_content, style="CurrentTab.TFrame")
+        recent_tab = ttk.Frame(tabs_content, style="CurrentTab.TFrame")
+        current_tab = ttk.Frame(tabs_content, style="CurrentTab.TFrame")
+        games_tab.rowconfigure(0, weight=1)
+        games_tab.columnconfigure(0, weight=1)
+        recent_tab.rowconfigure(0, weight=1)
+        recent_tab.columnconfigure(0, weight=1)
+        current_tab.rowconfigure(0, weight=1)
+        current_tab.columnconfigure(0, weight=1)
+        current_tab.grid(row=0, column=0, sticky="nsew")
+        games_tab.grid(row=0, column=0, sticky="nsew")
+        recent_tab.grid(row=0, column=0, sticky="nsew")
+        self.main_tab_frames = {
+            MAIN_TAB_CURRENT: current_tab,
+            MAIN_TAB_GAMES: games_tab,
+            MAIN_TAB_RECENT: recent_tab,
+        }
+        self.main_tab_buttons = {}
+        for index, tab_key in enumerate(MAIN_TAB_ORDER):
+            tab_button = ttk.Button(
+                tab_button_bar,
+                text=MAIN_TAB_LABELS[tab_key],
+                style="TButton",
+                command=lambda key=tab_key: self._on_main_tab_button_press(key),
+            )
+            right_gap = NOTEBOOK_TAB_SECTION_GAP if index < (len(MAIN_TAB_ORDER) - 1) else 0
+            tab_button.grid(row=0, column=index, sticky="w", padx=(0, right_gap))
+            if tab_key in MAIN_TAB_MAINTENANCE_KEYS:
+                tab_button.state(["disabled"])
+                tab_button.bind("<Enter>", self._on_maintenance_tab_button_enter)
+                tab_button.bind("<Motion>", self._on_maintenance_tab_button_motion)
+                tab_button.bind("<Leave>", self._on_maintenance_tab_button_leave)
+            self.main_tab_buttons[tab_key] = tab_button
         self.game_tree = self._build_games_table(games_tab)
         self.recent_tree = self._build_recent_table(recent_tab)
         self._build_current_game_tab(current_tab)
+        self._select_main_tab(MAIN_TAB_CURRENT, force=True)
         self._refresh_emulator_status_tab()
 
         self.status_bar = ttk.Frame(self.root)
@@ -1077,7 +1187,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
     # Method: _build_games_table - Construit les composants d'interface concernés.
     def _build_games_table(self, parent: ttk.Frame) -> ttk.Treeview:
-        container = ttk.Frame(parent)
+        container = ttk.Frame(parent, style="CurrentTab.TFrame")
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
@@ -1185,7 +1295,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             style="CurrentSummary.TLabelframe",
             padding=section_inner_padding,
         )
-        summary.grid(row=0, column=0, sticky="ew", padx=(section_outer_padx, section_outer_padx), pady=(8, section_gap))
+        summary.grid(row=0, column=0, sticky="ew", padx=(section_outer_padx, section_outer_padx), pady=(0, section_gap))
         summary.columnconfigure(0, weight=0)
         summary.columnconfigure(1, weight=0)
         summary.columnconfigure(2, weight=1)
@@ -1240,7 +1350,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
         next_achievement = ttk.LabelFrame(
             container,
-            text="Premier succès non débloqué",
+            text="Succès à débloquer",
             style="CurrentNext.TLabelframe",
             padding=section_inner_padding,
         )
@@ -1251,11 +1361,17 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             padx=(section_outer_padx, section_outer_padx),
             pady=(0, section_gap),
         )
+        next_achievement.columnconfigure(0, weight=1)
         next_achievement.columnconfigure(1, weight=1)
         next_achievement.rowconfigure(0, weight=1)
 
-        next_badge_frame = ttk.Frame(next_achievement, style="CurrentNext.TFrame", padding=(0, 0, 12, 0))
-        next_badge_frame.grid(row=0, column=0, sticky="nw")
+        next_content = ttk.Frame(next_achievement, style="CurrentNext.TFrame")
+        next_content.grid(row=0, column=0, columnspan=2, sticky="")
+        next_content.columnconfigure(0, weight=0)
+        next_content.columnconfigure(1, weight=0)
+
+        next_badge_frame = ttk.Frame(next_content, style="CurrentNext.TFrame", padding=(0, 0, 12, 0))
+        next_badge_frame.grid(row=0, column=0, sticky="")
         next_badge_label = ttk.Label(
             next_badge_frame,
             text="Image indisponible",
@@ -1267,15 +1383,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.current_game_image_labels["next_badge"] = next_badge_label
         self._track_rounded_image_widget(next_badge_label, BADGE_IMAGE_CORNER_RADIUS)
 
-        next_info = ttk.Frame(next_achievement, style="CurrentNext.TFrame", padding=(0, 0, 0, 0))
-        next_info.grid(row=0, column=1, sticky="nsew")
-        next_info.columnconfigure(0, weight=0, minsize=124)
-        next_info.columnconfigure(1, weight=1)
-        ttk.Label(next_info, text="Nom :", style="CurrentNext.TLabel").grid(row=0, column=0, sticky=W, padx=(0, 10), pady=field_gap_y)
+        next_info = ttk.Frame(next_content, style="CurrentNext.TFrame", padding=(0, 0, 0, 0))
+        next_info.grid(row=0, column=1, sticky="n")
+        next_info.columnconfigure(0, weight=1)
         ttk.Label(next_info, textvariable=self.current_game_next_achievement_title, style="CurrentNext.TLabel").grid(
-            row=0, column=1, sticky="ew", padx=(0, 0), pady=field_gap_y
+            row=0, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y
         )
-        ttk.Label(next_info, text="Description :", style="CurrentNext.TLabel").grid(row=1, column=0, sticky=W, padx=(0, 10), pady=field_gap_y)
         desc_label = ttk.Label(
             next_info,
             textvariable=self.current_game_next_achievement_description,
@@ -1284,37 +1397,33 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             anchor="w",
             wraplength=560,
         )
-        desc_label.grid(row=1, column=1, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        desc_label.grid(row=1, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
         self.current_game_next_achievement_desc_label = desc_label
-        ttk.Label(next_info, text="Points / ratio :", style="CurrentNext.TLabel").grid(
-            row=2,
-            column=0,
-            sticky=W,
-            padx=(0, 10),
-            pady=field_gap_y,
-        )
-        ttk.Label(next_info, textvariable=self.current_game_next_achievement_points, style="CurrentNext.TLabel").grid(row=2, column=1, sticky="ew", padx=(0, 0), pady=field_gap_y)
-        ttk.Label(next_info, text="Déblocages :", style="CurrentNext.TLabel").grid(
-            row=3,
-            column=0,
-            sticky=W,
-            padx=(0, 10),
-            pady=field_gap_y,
-        )
-        ttk.Label(next_info, textvariable=self.current_game_next_achievement_unlocks, style="CurrentNext.TLabel").grid(row=3, column=1, sticky="ew", padx=(0, 0), pady=field_gap_y)
-        ttk.Label(next_info, text="Faisabilité :", style="CurrentNext.TLabel").grid(
-            row=4,
-            column=0,
-            sticky=W,
-            padx=(0, 10),
-            pady=field_gap_y,
-        )
-        ttk.Label(next_info, textvariable=self.current_game_next_achievement_feasibility, style="CurrentNext.TLabel").grid(row=4, column=1, sticky="ew", padx=(0, 0), pady=field_gap_y)
-        nav_row = ttk.Frame(next_achievement)
+        ttk.Label(
+            next_info,
+            textvariable=self.current_game_next_achievement_points,
+            style="CurrentNext.TLabel",
+        ).grid(row=2, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        ttk.Label(
+            next_info,
+            textvariable=self.current_game_next_achievement_feasibility,
+            style="CurrentNext.TLabel",
+        ).grid(row=3, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        nav_row = ttk.Frame(next_achievement, style="CurrentNext.TFrame")
         nav_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 0), pady=(10, 0))
         nav_row.columnconfigure(0, weight=0)
-        nav_row.columnconfigure(1, weight=1, minsize=24)
+        nav_row.columnconfigure(1, weight=1, minsize=14)
         nav_row.columnconfigure(2, weight=0)
+        nav_row.columnconfigure(3, weight=0)
+        order_button = ttk.Button(
+            nav_row,
+            textvariable=self.current_game_achievement_order_label,
+            command=self._cycle_current_game_achievement_order_mode,
+            state="disabled",
+            style="CurrentNext.TButton",
+        )
+        order_button.grid(row=0, column=0, sticky="w", padx=(0, 0))
+        self.current_game_achievement_order_button = order_button
         previous_button = ttk.Button(
             nav_row,
             text="Précédent",
@@ -1322,7 +1431,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             state="disabled",
             style="CurrentNext.TButton",
         )
-        previous_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        previous_button.grid(row=0, column=2, sticky="e", padx=(0, 6))
         self.current_game_previous_achievement_button = previous_button
         next_button = ttk.Button(
             nav_row,
@@ -1331,7 +1440,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             state="disabled",
             style="CurrentNext.TButton",
         )
-        next_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        next_button.grid(row=0, column=3, sticky="e", padx=(0, 0))
         self.current_game_next_achievement_button = next_button
 
         all_achievements = ttk.LabelFrame(
@@ -1533,6 +1642,9 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.current_game_achievements_note.set("Aucun succès à afficher.")
         self.current_game_locked_achievements = []
         self.current_game_locked_achievement_index = 0
+        self._clear_current_game_clicked_achievement_selection()
+        self.current_game_last_clicked_achievement_key = ""
+        self.current_game_last_clicked_achievement_click_monotonic = 0.0
         self._refresh_achievement_navigation_buttons_state()
         self._current_game_last_key = None
         self.prefer_persisted_current_game_on_startup = False
@@ -1541,6 +1653,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if self.current_game_info_tree is not None:
             self.current_game_info_tree.delete(*self.current_game_info_tree.get_children())
         self.current_game_achievement_data = []
+        self._refresh_achievement_navigation_buttons_state()
         self.current_game_active_images = {}
         self._clear_current_game_achievement_gallery()
         self._hide_current_game_achievement_tooltip()
@@ -1718,12 +1831,22 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 return False
         return True
 
-    # Method: _finalize_current_game_loading_overlay_after_gallery - Attend le rendu des images de succès avant de masquer l'overlay.
-    def _finalize_current_game_loading_overlay_after_gallery(self, remaining_checks: int = 36) -> None:
+    # Method: _finalize_current_game_loading_overlay_after_gallery - Attend le rendu complet de la galerie (y compris badges différés) avant de masquer l'overlay.
+    def _finalize_current_game_loading_overlay_after_gallery(self, remaining_checks: int = 420) -> None:
         try:
             self.root.update_idletasks()
         except TclError:
             self._hide_current_game_loading_overlay()
+            return
+        # Tant que le worker de badges est actif, la galerie n'est pas prête pour un affichage complet.
+        if self.current_game_badge_loader_in_progress:
+            if remaining_checks <= 0:
+                self._hide_current_game_loading_overlay()
+                return
+            self.root.after(
+                60,
+                lambda: self._finalize_current_game_loading_overlay_after_gallery(remaining_checks - 1),
+            )
             return
         if self._are_current_game_achievement_tiles_rendered():
             self._hide_current_game_loading_overlay()
@@ -1732,18 +1855,27 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self._hide_current_game_loading_overlay()
             return
         self.root.after(
-            35,
+            60,
             lambda: self._finalize_current_game_loading_overlay_after_gallery(remaining_checks - 1),
         )
 
     # Method: _source_label_style - Détermine le style à appliquer selon la source détectée.
     def _source_label_style(self, source_value: str) -> str:
-        lowered = source_value.strip().lower()
-        if lowered.startswith("live"):
+        if self._is_live_source_label(source_value):
             return "CurrentSourceLive.TLabel"
-        if lowered.startswith("fallback"):
+        if self._is_fallback_source_label(source_value):
             return "CurrentSourceFallback.TLabel"
         return "CurrentSourceUnknown.TLabel"
+
+    # Method: _is_live_source_label - Indique si la source correspond à une détection directe du jeu en cours.
+    def _is_live_source_label(self, source_value: str) -> bool:
+        lowered = source_value.strip().lower()
+        return lowered.startswith("direct") or lowered.startswith("live")
+
+    # Method: _is_fallback_source_label - Indique si la source correspond à un repli local.
+    def _is_fallback_source_label(self, source_value: str) -> bool:
+        lowered = source_value.strip().lower()
+        return lowered.startswith("secours") or lowered.startswith("fallback")
 
     # Method: _set_current_game_source - Met à jour la source de détection et son style visuel.
     def _set_current_game_source(self, source_value: str) -> None:
@@ -1776,7 +1908,10 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._set_current_game_achievement_rows(next_achievement, has_achievements=bool(achievements))
         self._set_current_game_achievement_gallery(achievements, images)
         self._set_current_game_images(images)
-        self._sync_locked_achievement_navigation(achievements, next_achievement)
+        preferred_next = (
+            next_achievement if self.current_game_achievement_order_mode == ACHIEVEMENT_ORDER_NORMAL else None
+        )
+        self._sync_locked_achievement_navigation(achievements, preferred_next)
         return True
 
     # Method: _clear_current_game_achievement_gallery - Réinitialise la galerie de succès du jeu courant.
@@ -1994,12 +2129,14 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if not description:
             cache[normalized] = title_line.strip()
             return cache[normalized]
-        try:
-            translated = self._translate_achievement_description_to_french(description)
-            wrapped = self._format_tooltip_description_three_lines(translated)
-            result = f"{title_line.strip()}\n{wrapped}"
-        except Exception:
-            result = normalized
+        translated = self._translate_achievement_description_cached_only(description)
+        if translated == description:
+            self._schedule_achievement_description_translation(
+                description,
+                refresh_visible_summary=False,
+            )
+        wrapped = self._format_tooltip_description_three_lines(translated or description)
+        result = f"{title_line.strip()}\n{wrapped}"
         cache[normalized] = result
         return result
 
@@ -2118,11 +2255,11 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
     # Method: _on_profile_button_enter - Affiche l'infobulle lors du survol du bouton Profil.
     def _on_profile_button_enter(self, _event: object) -> None:
-        self._show_profile_maintenance_tooltip("en maintenance")
+        self._show_profile_maintenance_tooltip("En maintenance")
 
     # Method: _on_profile_button_motion - Déplace l'infobulle pendant le survol du bouton Profil.
     def _on_profile_button_motion(self, _event: object) -> None:
-        self._show_profile_maintenance_tooltip("en maintenance")
+        self._show_profile_maintenance_tooltip("En maintenance")
 
     # Method: _on_profile_button_leave - Masque l'infobulle quand le survol du bouton Profil se termine.
     def _on_profile_button_leave(self, _event: object) -> None:
@@ -2141,7 +2278,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self._hide_profile_maintenance_tooltip()
             return
         if active == target_index:
-            self._show_profile_maintenance_tooltip("en maintenance")
+            self._show_profile_maintenance_tooltip("En maintenance")
             return
         self._hide_profile_maintenance_tooltip()
 
@@ -2189,9 +2326,76 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: _on_global_pointer_motion - Affiche l'infobulle de maintenance du Profil selon la zone survolée.
     def _on_global_pointer_motion(self, _event: object) -> None:
         if self._is_pointer_over_profile_button() or self._is_pointer_over_profile_menu_item():
-            self._show_profile_maintenance_tooltip("en maintenance")
+            self._show_profile_maintenance_tooltip("En maintenance")
             return
         self._hide_profile_maintenance_tooltip()
+
+    # Method: _on_main_tab_button_press - Gère le clic sur un bouton de navigation principal.
+    def _on_main_tab_button_press(self, tab_key: str) -> None:
+        resolved_tab_key = self._resolve_main_tab_key(tab_key)
+        if resolved_tab_key is None:
+            return
+        button = self.main_tab_buttons.get(resolved_tab_key)
+        if button is not None:
+            try:
+                if button.instate(["disabled"]):
+                    self._show_maintenance_tab_tooltip("En maintenance")
+                    return
+            except TclError:
+                return
+        self._hide_maintenance_tab_tooltip()
+        self._select_main_tab(resolved_tab_key)
+
+    # Method: _resolve_main_tab_key - Convertit une clé ou un libellé d'onglet vers la clé interne canonique.
+    def _resolve_main_tab_key(self, tab_key: str) -> str | None:
+        raw = self._safe_text(tab_key)
+        if not raw:
+            return None
+        if raw in MAIN_TAB_ORDER:
+            return raw
+        normalized = raw.casefold()
+        aliases = {
+            MAIN_TAB_CURRENT: MAIN_TAB_CURRENT,
+            MAIN_TAB_LABELS[MAIN_TAB_CURRENT].casefold(): MAIN_TAB_CURRENT,
+            "jeu": MAIN_TAB_CURRENT,
+            MAIN_TAB_GAMES: MAIN_TAB_GAMES,
+            MAIN_TAB_LABELS[MAIN_TAB_GAMES].casefold(): MAIN_TAB_GAMES,
+            "game": MAIN_TAB_GAMES,
+            MAIN_TAB_RECENT: MAIN_TAB_RECENT,
+            MAIN_TAB_LABELS[MAIN_TAB_RECENT].casefold(): MAIN_TAB_RECENT,
+            "succes recents": MAIN_TAB_RECENT,
+        }
+        return aliases.get(normalized)
+
+    # Method: _select_main_tab - Active l'onglet visuel demandé et met à jour le style des boutons.
+    def _select_main_tab(self, tab_key: str, force: bool = False) -> None:
+        resolved_tab_key = self._resolve_main_tab_key(tab_key)
+        if resolved_tab_key is None:
+            return
+        frame = self.main_tab_frames.get(resolved_tab_key)
+        if frame is None or not frame.winfo_exists():
+            return
+        if not force and self.main_tab_selected_key == resolved_tab_key:
+            return
+        frame.tkraise()
+        self.main_tab_selected_key = resolved_tab_key
+        for key, button in self.main_tab_buttons.items():
+            if not button.winfo_exists():
+                continue
+            style_name = "MainTabSelected.TButton" if key == resolved_tab_key else "TButton"
+            button.configure(style=style_name)
+
+    # Method: _on_maintenance_tab_button_enter - Affiche l'infobulle au survol d'un bouton d'onglet en maintenance.
+    def _on_maintenance_tab_button_enter(self, _event: object) -> None:
+        self._show_maintenance_tab_tooltip("En maintenance")
+
+    # Method: _on_maintenance_tab_button_motion - Déplace l'infobulle pendant le survol d'un bouton d'onglet en maintenance.
+    def _on_maintenance_tab_button_motion(self, _event: object) -> None:
+        self._show_maintenance_tab_tooltip("En maintenance")
+
+    # Method: _on_maintenance_tab_button_leave - Masque l'infobulle de maintenance quand le pointeur quitte le bouton.
+    def _on_maintenance_tab_button_leave(self, _event: object) -> None:
+        self._hide_maintenance_tab_tooltip()
 
     # Method: _on_main_tabs_motion - Affiche "En maintenance" au survol des onglets désactivés.
     def _on_main_tabs_motion(self, event: object) -> None:
@@ -2219,6 +2423,14 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _on_main_tabs_leave(self, _event: object) -> None:
         self._hide_maintenance_tab_tooltip()
 
+    # Method: _sanitize_success_points_text - Retire la partie "True ratio" des anciens textes éventuellement en cache.
+    def _sanitize_success_points_text(self, points_text: str) -> str:
+        text = self._safe_text(points_text)
+        if not text:
+            return text
+        cleaned = re.sub(r"\s*\|\s*true\s*ratio\s*:\s*.*$", "", text, flags=re.IGNORECASE).strip()
+        return cleaned or text
+
     # Method: _set_current_game_achievement_rows - Met à jour le bloc "premier succès non débloqué".
     def _set_current_game_achievement_rows(self, next_achievement: dict[str, str] | None, has_achievements: bool = True) -> None:
         if not next_achievement:
@@ -2234,10 +2446,19 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             return
 
         description = self._safe_text(next_achievement.get("description", ACHIEVEMENT_NA_VALUE))
-        description = self._translate_achievement_description_cached_only(description)
+        if description and description not in {"-", ACHIEVEMENT_NA_VALUE}:
+            # Ne jamais bloquer l'UI sur un appel réseau de traduction.
+            translated_description = self._translate_achievement_description_cached_only(description)
+            if translated_description == description:
+                self._schedule_achievement_description_translation(
+                    description,
+                    refresh_visible_summary=True,
+                )
+            description = translated_description
+        points_text = self._sanitize_success_points_text(next_achievement.get("points", ACHIEVEMENT_NA_VALUE))
         self.current_game_next_achievement_title.set(next_achievement.get("title", ACHIEVEMENT_NA_VALUE))
         self.current_game_next_achievement_description.set(description or ACHIEVEMENT_NA_VALUE)
-        self.current_game_next_achievement_points.set(next_achievement.get("points", ACHIEVEMENT_NA_VALUE))
+        self.current_game_next_achievement_points.set(points_text or ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_unlocks.set(next_achievement.get("unlocks", ACHIEVEMENT_NA_VALUE))
         self.current_game_next_achievement_feasibility.set(next_achievement.get("feasibility", ACHIEVEMENT_NA_VALUE))
 
@@ -2254,6 +2475,182 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if isinstance(cached, str) and cached.strip():
             return cached.strip()
         return text
+
+    # Method: _normalize_achievement_description_text - Normalise une description pour les comparaisons et clés de cache.
+    def _normalize_achievement_description_text(self, description: str) -> str:
+        return " ".join(self._safe_text(description).split())
+
+    # Method: _schedule_achievement_description_translation - Lance une traduction asynchrone si absente du cache.
+    def _schedule_achievement_description_translation(
+        self,
+        description: str,
+        refresh_visible_summary: bool = False,
+    ) -> None:
+        normalized = self._normalize_achievement_description_text(description)
+        if not normalized or normalized in {"-", ACHIEVEMENT_NA_VALUE}:
+            return
+        cached = self._translate_achievement_description_cached_only(normalized)
+        if cached and cached != normalized:
+            if refresh_visible_summary:
+                self._apply_current_game_description_translation_if_visible(normalized, cached)
+            return
+
+        with self._achievement_translation_lock:
+            existing = self._achievement_translation_pending.get(normalized)
+            if existing is not None:
+                self._achievement_translation_pending[normalized] = bool(existing or refresh_visible_summary)
+                return
+            self._achievement_translation_pending[normalized] = bool(refresh_visible_summary)
+
+        worker = threading.Thread(
+            target=self._achievement_description_translation_worker,
+            args=(normalized,),
+            daemon=True,
+        )
+        worker.start()
+
+    # Method: _achievement_description_translation_worker - Traduit en arrière-plan et notifie l'UI si le texte affiché doit être rafraîchi.
+    def _achievement_description_translation_worker(self, source_text: str) -> None:
+        translated = source_text
+        try:
+            translated = self._translate_achievement_description_to_french(source_text) or source_text
+        except Exception:
+            translated = source_text
+
+        with self._achievement_translation_lock:
+            refresh_visible_summary = bool(self._achievement_translation_pending.pop(source_text, False))
+
+        normalized_translated = self._normalize_achievement_description_text(translated)
+        if not normalized_translated or normalized_translated == source_text:
+            return
+        if not refresh_visible_summary:
+            return
+        self._queue_ui_callback(
+            lambda src=source_text, dst=normalized_translated: self._apply_current_game_description_translation_if_visible(
+                src,
+                dst,
+            )
+        )
+
+    # Method: _apply_current_game_description_translation_if_visible - Applique la traduction seulement si la même description est encore affichée.
+    def _apply_current_game_description_translation_if_visible(self, source_text: str, translated_text: str) -> None:
+        source = self._normalize_achievement_description_text(source_text)
+        translated = self._normalize_achievement_description_text(translated_text)
+        if not source or not translated or source == translated:
+            return
+        current = self._normalize_achievement_description_text(self.current_game_next_achievement_description.get())
+        if current != source:
+            return
+        self.current_game_next_achievement_description.set(translated)
+
+    # Method: _achievement_order_label_for_mode - Retourne le libellé UI correspondant au mode de tri actif.
+    def _achievement_order_label_for_mode(self, mode: str) -> str:
+        return ACHIEVEMENT_ORDER_LABELS.get(mode, ACHIEVEMENT_ORDER_LABELS[ACHIEVEMENT_ORDER_NORMAL])
+
+    # Method: _achievement_row_normal_order - Retourne l'ordre "normal" d'une ligne de succès (fallback sur l'index courant).
+    def _achievement_row_normal_order(self, item: dict[str, str], fallback_index: int) -> int:
+        raw_order_text = self._safe_text(item.get("normal_order"))
+        if not raw_order_text:
+            return fallback_index
+        raw_order = self._safe_int(raw_order_text)
+        if raw_order < 0:
+            return fallback_index
+        return raw_order
+
+    # Method: _achievement_row_difficulty_sort_values - Extrait les champs de tri de difficulté (known, score).
+    def _achievement_row_difficulty_sort_values(self, item: dict[str, str]) -> tuple[int, float]:
+        known_rank = 0 if self._safe_bool(item.get("difficulty_known", "0")) else 1
+        raw_score = self._safe_text(item.get("difficulty_score"))
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            score = 9999.0
+        if score < 9999.0:
+            return known_rank, score
+
+        # Compatibilité cache/anciens enregistrements: dérive un score depuis "next_feasibility".
+        feasibility_text = self._safe_text(item.get("next_feasibility")).casefold()
+        if not feasibility_text or feasibility_text == "inconnue":
+            return 1, 9999.0
+
+        pct_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*%\s*des joueurs", feasibility_text)
+        if pct_match:
+            try:
+                unlock_pct = float(pct_match.group(1).replace(",", "."))
+                return 0, max(0.0, min(100.0, 100.0 - unlock_pct))
+            except ValueError:
+                pass
+
+        ratio_match = re.search(r"trueratio\s*([0-9]+(?:[.,][0-9]+)?)", feasibility_text)
+        if ratio_match:
+            try:
+                true_ratio = float(ratio_match.group(1).replace(",", "."))
+                if true_ratio > 0:
+                    return 0, min(999.0, true_ratio)
+            except ValueError:
+                pass
+
+        level_scores = (
+            ("très facile", 10.0),
+            ("tres facile", 10.0),
+            ("facile", 30.0),
+            ("moyenne", 50.0),
+            ("très difficile", 90.0),
+            ("tres difficile", 90.0),
+            ("difficile", 70.0),
+        )
+        for marker, fallback_score in level_scores:
+            if marker in feasibility_text:
+                return 0, fallback_score
+
+        return known_rank, score
+
+    # Method: _order_current_game_achievements - Applique le mode de tri demandé en conservant les succès non débloqués en premier.
+    def _order_current_game_achievements(self, achievements: list[dict[str, str]]) -> list[dict[str, str]]:
+        indexed_rows: list[tuple[int, dict[str, str]]] = []
+        for fallback_index, row in enumerate(achievements):
+            if not isinstance(row, dict):
+                continue
+            indexed_rows.append((fallback_index, dict(row)))
+
+        if not indexed_rows:
+            return []
+
+        def normal_key(row: tuple[int, dict[str, str]]) -> tuple[int, int, str, int]:
+            fallback_index, item = row
+            normal_order = self._achievement_row_normal_order(item, fallback_index)
+            ach_id = self._safe_int(item.get("next_id"))
+            if ach_id <= 0:
+                ach_id = 999_999_999
+            title = self._safe_text(item.get("next_title")).casefold()
+            return normal_order, ach_id, title, fallback_index
+
+        locked_rows: list[tuple[int, dict[str, str]]] = []
+        unlocked_rows: list[tuple[int, dict[str, str]]] = []
+        for row in indexed_rows:
+            if self._safe_bool(row[1].get("is_unlocked", "0")):
+                unlocked_rows.append(row)
+            else:
+                locked_rows.append(row)
+
+        mode = self.current_game_achievement_order_mode
+        if mode == ACHIEVEMENT_ORDER_EASY_TO_HARD:
+            def easy_key(row: tuple[int, dict[str, str]]) -> tuple[int, float, tuple[int, int, str, int]]:
+                known_rank, score = self._achievement_row_difficulty_sort_values(row[1])
+                return known_rank, score, normal_key(row)
+
+            locked_rows.sort(key=easy_key)
+        elif mode == ACHIEVEMENT_ORDER_HARD_TO_EASY:
+            def hard_key(row: tuple[int, dict[str, str]]) -> tuple[int, float, tuple[int, int, str, int]]:
+                known_rank, score = self._achievement_row_difficulty_sort_values(row[1])
+                return known_rank, -score, normal_key(row)
+
+            locked_rows.sort(key=hard_key)
+        else:
+            locked_rows.sort(key=normal_key)
+
+        unlocked_rows.sort(key=normal_key)
+        return [item for _, item in (locked_rows + unlocked_rows)]
 
     # Method: _extract_locked_achievements - Extrait les succès non débloqués pour la navigation précédente/suivante.
     def _extract_locked_achievements(self, achievements: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -2290,6 +2687,9 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _refresh_achievement_navigation_buttons_state(self) -> None:
         size = len(self.current_game_locked_achievements)
         index = self.current_game_locked_achievement_index
+        self.current_game_achievement_order_label.set(
+            self._achievement_order_label_for_mode(self.current_game_achievement_order_mode)
+        )
 
         previous_button = self.current_game_previous_achievement_button
         if previous_button is not None and previous_button.winfo_exists():
@@ -2304,6 +2704,13 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 next_button.state(["!disabled"])
             else:
                 next_button.state(["disabled"])
+
+        order_button = self.current_game_achievement_order_button
+        if order_button is not None and order_button.winfo_exists():
+            if self.current_game_achievement_data:
+                order_button.state(["!disabled"])
+            else:
+                order_button.state(["disabled"])
 
     # Method: _set_current_game_next_badge_from_image_key - Met à jour l'image du badge affiché dans la section "Premier succès".
     def _set_current_game_next_badge_from_image_key(self, image_key: str) -> None:
@@ -2320,11 +2727,120 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         except TclError:
             label.configure(image="", text="Format non supporté")
             return
-        scale = max((image.width() + 107) // 108, (image.height() + 107) // 108)
+        max_size = NEXT_ACHIEVEMENT_BADGE_MAX_SIZE
+        scale = max((image.width() + max_size - 1) // max_size, (image.height() + max_size - 1) // max_size)
         if scale > 1:
             image = image.subsample(scale, scale)
         self.current_game_image_refs["next_badge"] = image
         label.configure(image=image, text="")
+
+    # Method: _cancel_current_game_clicked_achievement_restore_job - Annule le retour automatique après aperçu temporaire.
+    def _cancel_current_game_clicked_achievement_restore_job(self) -> None:
+        if self.current_game_clicked_achievement_restore_job is None:
+            return
+        try:
+            self.root.after_cancel(self.current_game_clicked_achievement_restore_job)
+        except TclError:
+            pass
+        self.current_game_clicked_achievement_restore_job = None
+
+    # Method: _clear_current_game_clicked_achievement_selection - Réinitialise la sélection d'un succès cliqué dans la galerie.
+    def _clear_current_game_clicked_achievement_selection(self) -> None:
+        self._cancel_current_game_clicked_achievement_restore_job()
+        self.current_game_clicked_achievement_key = ""
+        self.current_game_clicked_achievement_persistent = False
+
+    # Method: _find_current_game_achievement_row_by_image_key - Retourne la ligne de données associée au badge cliqué.
+    def _find_current_game_achievement_row_by_image_key(self, image_key: str) -> dict[str, str] | None:
+        key = self._safe_text(image_key)
+        if not key:
+            return None
+        for row in self.current_game_achievement_data:
+            if not isinstance(row, dict):
+                continue
+            if self._safe_text(row.get("image_key")) == key:
+                return row
+        return None
+
+    # Method: _apply_current_game_clicked_achievement_preview - Affiche le succès sélectionné dans le bloc principal.
+    def _apply_current_game_clicked_achievement_preview(self, image_key: str) -> bool:
+        row = self._find_current_game_achievement_row_by_image_key(image_key)
+        if row is None:
+            return False
+        description = self._safe_text(row.get("next_description"))
+        description = self._translate_achievement_description_cached_only(description)
+        self._set_current_game_achievement_rows(
+            {
+                "title": self._safe_text(row.get("next_title")) or ACHIEVEMENT_NA_VALUE,
+                "description": description or ACHIEVEMENT_NA_VALUE,
+                "points": self._safe_text(row.get("next_points")) or ACHIEVEMENT_NA_VALUE,
+                "unlocks": self._safe_text(row.get("next_unlocks")) or ACHIEVEMENT_NA_VALUE,
+                "feasibility": self._safe_text(row.get("next_feasibility")) or ACHIEVEMENT_NA_VALUE,
+            },
+            has_achievements=True,
+        )
+        self._set_current_game_next_badge_from_image_key(self._safe_text(row.get("image_key")))
+        self._refresh_achievement_navigation_buttons_state()
+        return True
+
+    # Method: _restore_current_game_main_achievement_after_click_preview - Restaure l'affichage standard après l'aperçu temporaire.
+    def _restore_current_game_main_achievement_after_click_preview(self) -> None:
+        self.current_game_clicked_achievement_restore_job = None
+        if self.current_game_clicked_achievement_persistent:
+            return
+        self.current_game_clicked_achievement_key = ""
+        if self.current_game_locked_achievements:
+            self._apply_locked_achievement_index()
+            return
+        has_achievements = bool(self.current_game_achievement_data)
+        self._set_current_game_achievement_rows(None, has_achievements=has_achievements)
+        self._set_current_game_images(self.current_game_active_images)
+        self._refresh_achievement_navigation_buttons_state()
+
+    # Method: _reapply_current_game_clicked_achievement_if_active - Réapplique le succès cliqué si une sélection est active.
+    def _reapply_current_game_clicked_achievement_if_active(self) -> None:
+        key = self._safe_text(self.current_game_clicked_achievement_key)
+        if not key:
+            return
+        if self._apply_current_game_clicked_achievement_preview(key):
+            return
+        self._clear_current_game_clicked_achievement_selection()
+
+    # Method: _on_current_game_achievement_click - Gère la sélection temporaire/persistante d'un succès depuis la galerie.
+    def _on_current_game_achievement_click(self, image_key: str) -> None:
+        key = self._safe_text(image_key)
+        if not key:
+            return
+        if self._find_current_game_achievement_row_by_image_key(key) is None:
+            return
+        if self.current_game_clicked_achievement_key == key and self.current_game_clicked_achievement_persistent:
+            self._apply_current_game_clicked_achievement_preview(key)
+            return
+
+        now = time.monotonic()
+        second_click_same_achievement = (
+            key == self.current_game_last_clicked_achievement_key
+            and (now - self.current_game_last_clicked_achievement_click_monotonic) <= ACHIEVEMENT_CLICK_DOUBLE_WINDOW_SECONDS
+        )
+        self.current_game_last_clicked_achievement_key = key
+        self.current_game_last_clicked_achievement_click_monotonic = now
+
+        self.current_game_clicked_achievement_key = key
+        self.current_game_clicked_achievement_persistent = second_click_same_achievement
+        self._cancel_current_game_clicked_achievement_restore_job()
+        if not self._apply_current_game_clicked_achievement_preview(key):
+            self._clear_current_game_clicked_achievement_selection()
+            return
+
+        if second_click_same_achievement:
+            self._debug_log(f"_on_current_game_achievement_click persistent key='{key}'")
+            return
+
+        self.current_game_clicked_achievement_restore_job = self.root.after(
+            ACHIEVEMENT_CLICK_PREVIEW_MS,
+            self._restore_current_game_main_achievement_after_click_preview,
+        )
+        self._debug_log(f"_on_current_game_achievement_click preview key='{key}' duration_ms={ACHIEVEMENT_CLICK_PREVIEW_MS}")
 
     # Method: _apply_locked_achievement_index - Applique l'achievement verrouillé sélectionné dans la section dédiée.
     def _apply_locked_achievement_index(self) -> None:
@@ -2353,7 +2869,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         achievements: list[dict[str, str]],
         preferred_next_achievement: dict[str, str] | None = None,
     ) -> None:
-        self.current_game_locked_achievements = self._extract_locked_achievements(achievements)
+        ordered_achievements = self._order_current_game_achievements(achievements)
+        self.current_game_locked_achievements = self._extract_locked_achievements(ordered_achievements)
         self.current_game_locked_achievement_index = 0
         if preferred_next_achievement and self.current_game_locked_achievements:
             preferred_title = self._safe_text(preferred_next_achievement.get("title"))
@@ -2366,9 +2883,52 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 self.current_game_locked_achievement_index = index
                 break
         self._apply_locked_achievement_index()
+        self._reapply_current_game_clicked_achievement_if_active()
+
+    # Method: _cycle_current_game_achievement_order_mode - Fait tourner le mode d'ordre des succès et réapplique l'affichage.
+    def _cycle_current_game_achievement_order_mode(self) -> None:
+        try:
+            current_index = ACHIEVEMENT_ORDER_CYCLE.index(self.current_game_achievement_order_mode)
+        except ValueError:
+            current_index = 0
+        next_index = (current_index + 1) % len(ACHIEVEMENT_ORDER_CYCLE)
+        self.current_game_achievement_order_mode = ACHIEVEMENT_ORDER_CYCLE[next_index]
+        self.current_game_achievement_order_label.set(
+            self._achievement_order_label_for_mode(self.current_game_achievement_order_mode)
+        )
+
+        if not self.current_game_achievement_data:
+            self._refresh_achievement_navigation_buttons_state()
+            return
+
+        preferred_next: dict[str, str] | None = None
+        if self.current_game_locked_achievements:
+            size = len(self.current_game_locked_achievements)
+            self.current_game_locked_achievement_index = max(
+                0,
+                min(size - 1, self.current_game_locked_achievement_index),
+            )
+            selected = self.current_game_locked_achievements[self.current_game_locked_achievement_index]
+            preferred_next = {
+                "title": selected.get("title", ""),
+                "description": selected.get("description", ""),
+            }
+
+        self._set_current_game_achievement_gallery(
+            [dict(item) for item in self.current_game_achievement_data],
+            dict(self.current_game_active_images),
+        )
+        self._sync_locked_achievement_navigation(
+            [dict(item) for item in self.current_game_achievement_data],
+            preferred_next,
+        )
+        self._debug_log(
+            f"_cycle_current_game_achievement_order_mode mode='{self.current_game_achievement_order_mode}'"
+        )
 
     # Method: _show_next_locked_achievement - Affiche le succès non débloqué suivant dans la section dédiée.
     def _show_next_locked_achievement(self) -> None:
+        self._clear_current_game_clicked_achievement_selection()
         size = len(self.current_game_locked_achievements)
         if size <= 1:
             self._refresh_achievement_navigation_buttons_state()
@@ -2381,6 +2941,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
     # Method: _show_previous_locked_achievement - Affiche le succès non débloqué précédent dans la section dédiée.
     def _show_previous_locked_achievement(self) -> None:
+        self._clear_current_game_clicked_achievement_selection()
         size = len(self.current_game_locked_achievements)
         if size <= 1:
             self._refresh_achievement_navigation_buttons_state()
@@ -2471,24 +3032,30 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self.current_game_locked_achievement_index = max(0, min(size - 1, self.current_game_locked_achievement_index))
             selected = self.current_game_locked_achievements[self.current_game_locked_achievement_index]
             self._set_current_game_next_badge_from_image_key(selected.get("image_key", ""))
+        clicked_key = self._safe_text(self.current_game_clicked_achievement_key)
+        if clicked_key:
+            self._set_current_game_next_badge_from_image_key(clicked_key)
 
     # Method: _set_current_game_achievement_gallery - Alimente la galerie des succès avec images + infobulles.
     def _set_current_game_achievement_gallery(self, achievements: list[dict[str, str]], images: dict[str, bytes]) -> None:
-        self.current_game_achievement_data = achievements
+        self.current_game_achievement_data = [dict(item) for item in achievements if isinstance(item, dict)]
+        ordered_achievements = self._order_current_game_achievements(self.current_game_achievement_data)
         self._clear_current_game_achievement_gallery()
         if self.current_game_achievements_inner is None:
             return
-        if not achievements:
+        if not ordered_achievements:
             self.current_game_locked_achievements = []
             self.current_game_locked_achievement_index = 0
+            self._clear_current_game_clicked_achievement_selection()
             self._refresh_achievement_navigation_buttons_state()
             self.current_game_achievements_note.set("Aucun succès disponible pour ce jeu.")
             return
 
+        order_label = self._achievement_order_label_for_mode(self.current_game_achievement_order_mode).replace("Ordre: ", "")
         self.current_game_achievements_note.set(
-            f"{len(achievements)} succès (survolez une image pour voir le nom et la description)."
+            f"{len(ordered_achievements)} succès | {order_label} (survolez une image pour voir le nom et la description)."
         )
-        for index, achievement in enumerate(achievements):
+        for index, achievement in enumerate(ordered_achievements):
             image_key = achievement.get("image_key", "")
             tooltip_text = achievement.get("tooltip", "").strip()
             label = ttk.Label(
@@ -2497,6 +3064,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 style="CurrentGallery.TLabel",
                 anchor="center",
                 justify="center",
+                cursor="hand2",
             )
             raw_data = images.get(image_key)
             if raw_data:
@@ -2514,6 +3082,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             label.bind("<Enter>", lambda _event, text=tooltip_text, idx=index: self._on_current_game_achievement_enter(text, idx))
             label.bind("<Motion>", lambda _event, text=tooltip_text, idx=index: self._on_current_game_achievement_motion(text, idx))
             label.bind("<Leave>", lambda _event: self._on_current_game_achievement_leave())
+            label.bind("<Button-1>", lambda _event, key=image_key: self._on_current_game_achievement_click(key))
             self._track_rounded_image_widget(label, ACHIEVEMENT_IMAGE_CORNER_RADIUS)
             self.current_game_achievement_tiles.append(label)
             if image_key:
@@ -2566,7 +3135,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             except TclError:
                 label.configure(image="", text="Format non supporté")
                 continue
-            max_width, max_height = (320, 180) if key == "boxart" else (108, 108)
+            if key == "boxart":
+                max_width, max_height = (320, 180)
+            elif key == "next_badge":
+                max_width, max_height = (NEXT_ACHIEVEMENT_BADGE_MAX_SIZE, NEXT_ACHIEVEMENT_BADGE_MAX_SIZE)
+            else:
+                max_width, max_height = (108, 108)
             scale = max((image.width() + max_width - 1) // max_width, (image.height() + max_height - 1) // max_height)
             if scale > 1:
                 image = image.subsample(scale, scale)
@@ -2640,6 +3214,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             return False
         lowered = text.casefold()
         negative_markers = (
+            "main menu",
+            "menu principal",
             "no game",
             "game not loaded",
             "not loaded",
@@ -2652,13 +3228,17 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         return not any(marker in lowered for marker in negative_markers)
 
     # Method: _extract_live_current_game - Extrait le jeu en cours depuis le résumé API.
-    def _extract_live_current_game(self, summary: dict[str, object]) -> tuple[int, str, str, bool]:
+    def _extract_live_current_game(self, summary: dict[str, object]) -> tuple[int, str, str, bool, str]:
         rich_presence = ""
+        rich_presence_raw = ""
         for field in ("RichPresenceMsg", "RichPresence", "RichPresenceMessage"):
             value = self._safe_text(summary.get(field))
-            if value and self._is_rich_presence_game_loaded(value):
+            if not value:
+                continue
+            rich_presence_raw = value
+            if self._is_rich_presence_game_loaded(value):
                 rich_presence = value
-                break
+            break
 
         rich_presence_date = self._safe_text(
             summary.get("RichPresenceMsgDate")
@@ -2666,50 +3246,132 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             or summary.get("RichPresenceUpdatedAt")
         )
         rich_presence_recent = bool(rich_presence) and self._is_recent_activity_timestamp(rich_presence_date)
+        strict_fallback_presence_recent = bool(rich_presence) and self._is_recent_activity_timestamp(
+            rich_presence_date,
+            max_age_seconds=LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS,
+        )
         if rich_presence and not rich_presence_recent:
             rich_presence = ""
+        rich_presence_explicit_no_game = bool(rich_presence_raw) and not bool(rich_presence)
+        rich_presence_preview = " ".join(rich_presence_raw.split())
+        if len(rich_presence_preview) > 110:
+            rich_presence_preview = f"{rich_presence_preview[:107]}..."
+        recent_activity_window_seconds = (
+            LIVE_RECENT_PLAYED_MAX_AGE_SECONDS
+            if rich_presence
+            else LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS
+        )
 
         recent = summary.get("RecentlyPlayed")
         recent_activity_detected = False
-        if isinstance(recent, list):
-            for item in recent:
-                if not isinstance(item, dict):
-                    continue
-                for key in ("LastPlayed", "DateModified", "Date", "MostRecentAwardedDate"):
-                    if self._is_recent_activity_timestamp(
-                        item.get(key),
-                        max_age_seconds=LIVE_RECENT_PLAYED_MAX_AGE_SECONDS,
-                    ):
-                        recent_activity_detected = True
-                        break
-                if recent_activity_detected:
-                    break
-
-        online = self._safe_bool(summary.get("IsOnline")) or self._safe_bool(summary.get("IsOnine"))
-        if not online and not rich_presence and not recent_activity_detected:
-            return 0, "", rich_presence, online
-
+        best_recent_game_id = 0
+        best_recent_title = ""
+        best_recent_timestamp = -1.0
+        strict_best_recent_game_id = 0
+        strict_best_recent_title = ""
+        strict_best_recent_timestamp = -1.0
+        fallback_recent_game_id = 0
+        fallback_recent_title = ""
         if isinstance(recent, list):
             for item in recent:
                 if not isinstance(item, dict):
                     continue
                 game_id = self._safe_int(item.get("GameID") or item.get("ID"))
-                if game_id <= 0:
-                    continue
                 title = self._extract_title_text(item.get("Title") or item.get("GameTitle") or item)
-                return game_id, title, rich_presence, online
+                if game_id > 0 and fallback_recent_game_id <= 0:
+                    fallback_recent_game_id = game_id
+                    fallback_recent_title = title
 
-        direct_pairs = (
-            ("GameID", "GameTitle"),
-            ("MostRecentGameID", "MostRecentGameTitle"),
-            ("LastGameID", "LastGame"),
-        )
-        for game_id_field, title_field in direct_pairs:
-            game_id = self._safe_int(summary.get(game_id_field))
-            if game_id > 0:
-                return game_id, self._extract_title_text(summary.get(title_field)), rich_presence, online
+                candidate_date = (
+                    self._safe_text(item.get("LastPlayed"))
+                    or self._safe_text(item.get("DateModified"))
+                    or self._safe_text(item.get("Date"))
+                    or self._safe_text(item.get("MostRecentAwardedDate"))
+                )
+                parsed_candidate = self._parse_sort_datetime(candidate_date)
+                candidate_timestamp = parsed_candidate.timestamp() if parsed_candidate is not None else -1.0
+                is_recent_item = self._is_recent_activity_timestamp(
+                    candidate_date,
+                    max_age_seconds=recent_activity_window_seconds,
+                )
+                if is_recent_item:
+                    recent_activity_detected = True
+                    if game_id > 0 and candidate_timestamp > best_recent_timestamp:
+                        best_recent_timestamp = candidate_timestamp
+                        best_recent_game_id = game_id
+                        best_recent_title = title
+                is_strict_recent_item = self._is_recent_activity_timestamp(
+                    candidate_date,
+                    max_age_seconds=LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS,
+                )
+                if is_strict_recent_item and game_id > 0 and candidate_timestamp > strict_best_recent_timestamp:
+                    strict_best_recent_timestamp = candidate_timestamp
+                    strict_best_recent_game_id = game_id
+                    strict_best_recent_title = title
 
-        return 0, "", rich_presence, online
+        online = self._safe_bool(summary.get("IsOnline")) or self._safe_bool(summary.get("IsOnine"))
+        def emit_result(
+            game_id: int,
+            title: str,
+            presence: str,
+            is_online_value: bool,
+            decision: str,
+        ) -> tuple[int, str, str, bool, str]:
+            self._probe(
+                "extract_live_current_game",
+                decision=decision,
+                game_id=game_id,
+                rich_presence=bool(presence),
+                rich_presence_recent=rich_presence_recent,
+                strict_fallback_presence_recent=strict_fallback_presence_recent,
+                recent_activity=recent_activity_detected,
+                best_recent_game_id=best_recent_game_id,
+                strict_best_recent_game_id=strict_best_recent_game_id,
+                online=is_online_value,
+                rich_presence_preview=rich_presence_preview or "-",
+                rich_presence_date=rich_presence_date or "-",
+            )
+            return game_id, title, presence, is_online_value, decision
+        if rich_presence_explicit_no_game:
+            return emit_result(0, "", "", online, "explicit_no_game")
+        if not rich_presence and not recent_activity_detected:
+            return emit_result(0, "", rich_presence, online, "no_recent_activity")
+
+        # En mode "live", on privilégie d'abord les champs directs GameID/MostRecentGameID.
+        # Cela évite de choisir un mauvais jeu via RecentlyPlayed quand le Rich Presence est valide.
+        if rich_presence:
+            direct_pairs = (
+                ("GameID", "GameTitle"),
+                ("MostRecentGameID", "MostRecentGameTitle"),
+            )
+            for game_id_field, title_field in direct_pairs:
+                game_id = self._safe_int(summary.get(game_id_field))
+                if game_id > 0:
+                    return emit_result(
+                        game_id,
+                        self._extract_title_text(summary.get(title_field)),
+                        rich_presence,
+                        online,
+                        f"direct_pair:{game_id_field}",
+                    )
+            if strict_fallback_presence_recent and strict_best_recent_game_id > 0:
+                return emit_result(
+                    strict_best_recent_game_id,
+                    strict_best_recent_title,
+                    rich_presence,
+                    online,
+                    "recent_fallback",
+                )
+            if best_recent_game_id > 0:
+                return emit_result(
+                    0,
+                    "",
+                    rich_presence,
+                    online,
+                    "recent_fallback_rejected_stale_presence",
+                )
+
+        return emit_result(0, "", rich_presence, online, "no_live_game")
 
     # Method: _extract_last_played_game - Extrait le dernier jeu joué depuis le résumé API.
     def _extract_last_played_game(self, summary: dict[str, object]) -> tuple[int, str]:
@@ -3003,7 +3665,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 if game_id > 0:
                     games_lookup[game_id] = item
 
-        emulator_live = self._is_emulator_live()
+        emulator_live = self._is_emulator_process_live()
         if emulator_live:
             self.prefer_persisted_current_game_on_startup = False
         fallback_game_id, fallback_title = self._pick_current_game(dashboard, prefer_last_played=not emulator_live)
@@ -3035,7 +3697,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 fallback_game_id,
                 fallback_title,
                 games_lookup,
-                source="Dernier jeu joué (local)" if not emulator_live else "Fallback local",
+                source="Dernier jeu joué (local)" if not emulator_live else "Secours local",
             )
             if (not same_fallback) and allow_fallback_preview:
                 self.current_game_title.set(title_value)
@@ -3078,8 +3740,13 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self._hide_current_game_loading_overlay()
             return
 
-        if self.current_game_fetch_in_progress and not force_refresh:
-            self._debug_log("_update_current_game_tab ignoré: récupération déjà en cours.")
+        if self.current_game_fetch_in_progress:
+            if force_refresh:
+                self._pending_emulator_status_force_refresh = True
+            self._debug_log(
+                "_update_current_game_tab ignoré: récupération déjà en cours "
+                f"(force_refresh={force_refresh})."
+            )
             self._hide_current_game_loading_overlay()
             return
 
@@ -3127,7 +3794,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         )
         game_id = fallback_game_id
         title_hint = fallback_title
-        source_label = "Dernier jeu joué (local)" if not emulator_live else "Fallback local"
+        source_label = "Dernier jeu joué (local)" if not emulator_live else "Secours local"
         rich_presence = ""
         summary_payload: dict[str, object] = {}
         game_payload: dict[str, object] = {}
@@ -3138,15 +3805,15 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         diagnostic_error: str | None = None
         startup_cache_preferred = False
 
-        client = RetroAchievementsClient(api_key)
+        client = RetroAchievementsClient(api_key, timeout_seconds=8)
         try:
             summary = client.get_user_summary(username, include_recent_games=True)
             summary_payload = summary
-            live_game_id, live_title, rich_presence, is_online = self._extract_live_current_game(summary)
+            live_game_id, live_title, rich_presence, is_online, live_decision = self._extract_live_current_game(summary)
             last_played_id, last_played_title = self._extract_last_played_game(summary)
             self._debug_log(
                 f"_fetch_current_game_worker summary live_game_id={live_game_id} last_played_id={last_played_id} "
-                f"is_online={is_online} rich_presence={'yes' if bool(rich_presence) else 'no'}"
+                f"live_decision={live_decision} is_online={is_online} rich_presence={'yes' if bool(rich_presence) else 'no'}"
             )
 
             startup_cache_preferred = (
@@ -3159,11 +3826,17 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             if startup_cache_preferred:
                 game_id = retained_game_id
                 source_label = "Cache sauvegarde"
-            elif emulator_live and live_game_id > 0:
+            elif live_game_id > 0:
                 game_id = live_game_id
                 if live_title:
                     title_hint = live_title
-                source_label = "Live émulateur"
+                source_label = "Direct émulateur" if emulator_live else "Direct RA"
+            elif emulator_live and last_played_id > 0:
+                # Fallback prudent: on affiche un jeu plausible, sans le considérer comme "jeu live confirmé".
+                game_id = last_played_id
+                if last_played_title:
+                    title_hint = last_played_title
+                source_label = "Dernier jeu joué (direct indisponible)"
             elif emulator_live:
                 game_id = 0
                 title_hint = ""
@@ -3180,7 +3853,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             diagnostic_error = self._format_diagnostic_error(exc)
             self._debug_log(f"_fetch_current_game_worker erreur summary: {diagnostic_error}")
             if fallback_game_id > 0:
-                source_label = "Dernier jeu joué (local)" if not emulator_live else "Fallback local"
+                source_label = "Dernier jeu joué (local)" if not emulator_live else "Secours local"
             else:
                 source_label = "Inconnu"
 
@@ -3215,6 +3888,16 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             )
             return
 
+        self._probe(
+            "current_game_worker_select",
+            token=fetch_token,
+            emulator_live=emulator_live,
+            live_game_detected=source_label,
+            selected_game_id=game_id,
+            retained_game_id=retained_game_id,
+            fallback_game_id=fallback_game_id,
+        )
+
         if game_id <= 0:
             if emulator_live:
                 source_label = source_label or EMULATOR_STATUS_EMULATOR_LOADED
@@ -3222,6 +3905,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             else:
                 note_text = "Aucun jeu en cours ou dernier jeu joué détecté."
             self._debug_log(f"_fetch_current_game_worker aucun jeu détecté token={fetch_token} source='{source_label}'")
+            self._probe(
+                "current_game_worker_no_game",
+                token=fetch_token,
+                source=source_label,
+                emulator_live=emulator_live,
+            )
             _, _, _, _, source_value, _ = self._build_current_game_local_rows(
                 0,
                 "",
@@ -3265,20 +3954,33 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             for index, achievement in enumerate(all_achievements):
                 ach_id = self._safe_int(achievement.get("ID"))
                 image_key = f"achievement_{ach_id if ach_id > 0 else (index + 1)}_{index}"
-                tooltip = self._build_achievement_tooltip(achievement)
+                translated_achievement = dict(achievement)
+                raw_description = self._safe_text(achievement.get("Description")) or "Sans description."
+                translated_description = self._translate_achievement_description_cached_only(raw_description)
+                translated_achievement["Description"] = translated_description or raw_description
+                tooltip = self._build_achievement_tooltip(translated_achievement)
                 is_unlocked = self._is_achievement_unlocked(achievement)
                 badge_url = self._achievement_badge_url(achievement)
                 locked_badge_url = self._locked_badge_url(badge_url) if badge_url else ""
                 summary = self._build_next_achievement_summary(
-                    achievement,
+                    translated_achievement,
                     total_players=total_players,
                     translate_description=False,
+                )
+                awarded_value = self._safe_int(achievement.get("NumAwarded"))
+                true_ratio_value = self._safe_float(achievement.get("TrueRatio"))
+                difficulty_known, difficulty_score = self._compute_achievement_difficulty_score(
+                    awarded_value,
+                    total_players,
+                    true_ratio_value,
                 )
                 achievement_rows.append(
                     {
                         "image_key": image_key,
                         "tooltip": tooltip,
                         "is_unlocked": "1" if is_unlocked else "0",
+                        "normal_order": str(index),
+                        "next_id": str(ach_id),
                         "badge_url": badge_url,
                         "badge_url_locked": locked_badge_url,
                         "next_title": summary.get("title", ACHIEVEMENT_NA_VALUE),
@@ -3286,6 +3988,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                         "next_points": summary.get("points", ACHIEVEMENT_NA_VALUE),
                         "next_unlocks": summary.get("unlocks", ACHIEVEMENT_NA_VALUE),
                         "next_feasibility": summary.get("feasibility", ACHIEVEMENT_NA_VALUE),
+                        "difficulty_known": "1" if difficulty_known else "0",
+                        "difficulty_score": f"{difficulty_score:.6f}",
                     }
                 )
 
@@ -3325,15 +4029,27 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             summary_payload=summary_payload,
             game_payload=game_payload,
         )
-        if source_label.startswith("Live"):
+        if self._is_live_source_label(source_label):
             note = "Jeu détecté en direct."
         elif source_label.startswith("Dernier jeu joué"):
-            note = "Émulateur inactif: affichage du dernier jeu joué."
+            if emulator_live:
+                note = "Émulateur chargé: jeu direct indisponible, affichage du dernier jeu joué."
+            else:
+                note = "Émulateur inactif: affichage du dernier jeu joué."
         else:
             note = "Détails chargés."
         self._debug_log(
             f"_fetch_current_game_worker fin token={fetch_token} game_id={game_id} "
             f"source='{source_label}' note='{note}' error={'yes' if bool(error) else 'no'}"
+        )
+        self._probe(
+            "current_game_worker_end",
+            token=fetch_token,
+            game_id=game_id,
+            source=source_label,
+            note=note,
+            error=bool(error),
+            achievement_rows=len(achievement_rows),
         )
         self._queue_ui_callback(
             lambda: self._on_current_game_loaded(
@@ -3389,7 +4105,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _trigger_refresh_after_live_game_loaded(self, source_value: str) -> None:
         if not self.pending_refresh_after_live_game_load:
             return
-        if not self._is_emulator_live():
+        if not self._is_emulator_process_live():
             self.pending_refresh_after_live_game_load = False
             return
         self.pending_refresh_after_live_game_load = False
@@ -3406,7 +4122,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 force_current_game_refresh=False,
             )
         if self._has_valid_connection():
-            self._request_event_sync("jeu Live chargé", delay_ms=0)
+            self._request_event_sync("jeu direct chargé", delay_ms=0)
 
         try:
             self.root.after(0, do_refresh)
@@ -3415,14 +4131,33 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
     # Method: _sync_emulator_status_after_current_game_update - Ajuste le statut Live selon la source réellement chargée.
     def _sync_emulator_status_after_current_game_update(self, source_value: str) -> None:
-        lowered_source = source_value.strip().lower()
-        if lowered_source.startswith("live"):
+        previous_status = self.emulator_status_text.get().strip()
+        emulator_process_live = self._is_emulator_process_live()
+        if self._is_live_source_label(source_value) and emulator_process_live:
             self._set_emulator_status_text(EMULATOR_STATUS_GAME_LOADED)
+            self._probe(
+                "sync_status_after_game_update",
+                source=source_value,
+                previous_status=previous_status,
+                next_status=EMULATOR_STATUS_GAME_LOADED,
+            )
             return
-        if not self._is_emulator_live():
+        if not emulator_process_live:
             self._set_emulator_status_text(EMULATOR_STATUS_INACTIVE)
+            self._probe(
+                "sync_status_after_game_update",
+                source=source_value,
+                previous_status=previous_status,
+                next_status=EMULATOR_STATUS_INACTIVE,
+            )
             return
         self._set_emulator_status_text(EMULATOR_STATUS_EMULATOR_LOADED)
+        self._probe(
+            "sync_status_after_game_update",
+            source=source_value,
+            previous_status=previous_status,
+            next_status=EMULATOR_STATUS_EMULATOR_LOADED,
+        )
 
     # Method: _extract_game_detail_rows - Réalise le traitement lié à extract game detail rows.
     def _extract_game_detail_rows(self, payload: dict[str, object]) -> list[tuple[str, str]]:
@@ -3511,8 +4246,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self.current_game_progress.set(progress_value)
         self.current_game_last_unlock.set(last_unlock_value)
         self._set_current_game_source(source_value)
-        lowered_source = source_value.strip().lower()
-        if lowered_source.startswith("live"):
+        if self._is_live_source_label(source_value):
             self.prefer_persisted_current_game_on_startup = False
         self._sync_emulator_status_after_current_game_update(source_value)
         if diagnostic_error:
@@ -3540,7 +4274,10 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._set_current_game_achievement_rows(next_achievement, has_achievements=bool(achievement_rows))
         self._set_current_game_achievement_gallery(achievement_rows, images)
         self._set_current_game_images(images)
-        self._sync_locked_achievement_navigation(achievement_rows, next_achievement)
+        preferred_next = (
+            next_achievement if self.current_game_achievement_order_mode == ACHIEVEMENT_ORDER_NORMAL else None
+        )
+        self._sync_locked_achievement_navigation(achievement_rows, preferred_next)
         self._persist_current_game_cache_after_inactive_transition_if_needed(
             source_value or self.current_game_source.get()
         )
@@ -3573,17 +4310,14 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self.top_bar is not None
             and self.connection_button
             and self.profile_button
-            and self.summary_label
             and self.theme_toggle_frame
         ):
-            for col in range(4):
+            for col in range(3):
                 self.top_bar.columnconfigure(col, weight=0)
             self.top_bar.columnconfigure(2, weight=1)
-            self.summary_label.configure(wraplength=max(200, width - 430))
             self.connection_button.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=0, sticky=W)
             self.profile_button.grid_configure(row=0, column=1, columnspan=1, padx=(0, 8), pady=0, sticky=W)
-            self.summary_label.grid_configure(row=0, column=2, columnspan=1, padx=(6, 0), pady=0, sticky=W)
-            self.theme_toggle_frame.grid_configure(row=0, column=3, columnspan=1, padx=(0, 0), pady=0, sticky="e")
+            self.theme_toggle_frame.grid_configure(row=0, column=2, columnspan=1, padx=(0, 8), pady=0, sticky="e")
 
         if self.current_game_title_value_label is not None:
             self.current_game_title_value_label.configure(wraplength=max(240, min(920, width - 470)))
@@ -3630,7 +4364,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._set_theme(defaults["theme_mode"], persist=False)
         self._refresh_connection_summary()
         self._load_persisted_current_game_cache()
-        self.root.after_idle(lambda: self._apply_saved_window_geometry(defaults.get("window_geometry", "")))
+        self.root.after_idle(lambda: self._schedule_saved_window_geometry_apply(defaults.get("window_geometry", "")))
 
     # Method: _encode_current_game_images_for_cache - Convertit les images (bytes) en texte base64 pour le fichier JSON.
     def _encode_current_game_images_for_cache(self, images: dict[str, bytes]) -> dict[str, str]:
@@ -3718,8 +4452,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _persist_current_game_cache_after_inactive_transition_if_needed(self, source_value: str = "") -> None:
         if not self.persist_current_game_cache_on_inactive_transition:
             return
-        source = source_value.strip().lower()
-        if source.startswith("live"):
+        if self._is_live_source_label(source_value):
             return
         self.persist_current_game_cache_on_inactive_transition = False
         self._persist_current_game_cache()
@@ -3793,11 +4526,63 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._set_current_game_achievement_rows(next_achievement, has_achievements=bool(achievements))
         self._set_current_game_achievement_gallery(achievements, images)
         self._set_current_game_images(images)
-        self._sync_locked_achievement_navigation(achievements, next_achievement)
+        preferred_next = (
+            next_achievement if self.current_game_achievement_order_mode == ACHIEVEMENT_ORDER_NORMAL else None
+        )
+        self._sync_locked_achievement_navigation(achievements, preferred_next)
         self.prefer_persisted_current_game_on_startup = True
         self._debug_log(
             f"_load_persisted_current_game_cache restored game_id={game_id} username='{key_username}'"
         )
+
+    # Method: _cancel_saved_window_geometry_apply_job - Annule la réapplication différée de la géométrie sauvegardée.
+    def _cancel_saved_window_geometry_apply_job(self) -> None:
+        if self.saved_window_geometry_apply_job is None:
+            return
+        try:
+            self.root.after_cancel(self.saved_window_geometry_apply_job)
+        except TclError:
+            pass
+        self.saved_window_geometry_apply_job = None
+
+    # Method: _schedule_saved_window_geometry_apply - Planifie plusieurs applications pour fiabiliser la position au démarrage.
+    def _schedule_saved_window_geometry_apply(self, geometry_value: str) -> None:
+        geometry = str(geometry_value).strip()
+        self._cancel_saved_window_geometry_apply_job()
+        if not geometry or not WINDOW_GEOMETRY_RE.fullmatch(geometry):
+            self._saved_window_geometry_pending = ""
+            self._saved_window_geometry_retry_remaining = 0
+            return
+        self._saved_window_geometry_pending = geometry
+        self._saved_window_geometry_retry_remaining = SAVED_WINDOW_GEOMETRY_RETRY_COUNT
+        self._apply_saved_window_geometry(geometry)
+        self.saved_window_geometry_apply_job = self.root.after(
+            SAVED_WINDOW_GEOMETRY_RETRY_DELAY_MS,
+            self._reapply_saved_window_geometry_if_needed,
+        )
+
+    # Method: _reapply_saved_window_geometry_if_needed - Réapplique brièvement la géométrie pour contrer un repositionnement tardif.
+    def _reapply_saved_window_geometry_if_needed(self) -> None:
+        self.saved_window_geometry_apply_job = None
+        geometry = self._saved_window_geometry_pending
+        if not geometry:
+            return
+        if self._saved_window_geometry_retry_remaining <= 0:
+            self._saved_window_geometry_pending = ""
+            return
+        self._saved_window_geometry_retry_remaining -= 1
+        self._apply_saved_window_geometry(geometry)
+        if self._saved_window_geometry_retry_remaining <= 0:
+            self._saved_window_geometry_pending = ""
+            return
+        try:
+            self.saved_window_geometry_apply_job = self.root.after(
+                SAVED_WINDOW_GEOMETRY_RETRY_DELAY_MS,
+                self._reapply_saved_window_geometry_if_needed,
+            )
+        except TclError:
+            self.saved_window_geometry_apply_job = None
+            self._saved_window_geometry_pending = ""
 
     # Method: _apply_saved_window_geometry - Applique les paramètres ou la transformation nécessaires.
     def _apply_saved_window_geometry(self, geometry_value: str) -> None:
@@ -3805,6 +4590,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if not geometry or not WINDOW_GEOMETRY_RE.fullmatch(geometry):
             return
         try:
+            self.root.geometry(geometry)
+            self.root.update_idletasks()
             self.root.geometry(geometry)
         except TclError:
             return
@@ -3958,19 +4745,39 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: _event_sync_probe_worker - Vérifie les changements distants puis notifie l'UI.
     def _event_sync_probe_worker(self, api_key: str, username: str, emulator_live: bool, reason: str) -> None:
         detected_game_id = 0
+        live_game_id = 0
         unlock_marker = ""
         diagnostic_error: str | None = None
         try:
-            client = RetroAchievementsClient(api_key)
+            client = RetroAchievementsClient(api_key, timeout_seconds=8)
             summary = client.get_user_summary(username, include_recent_games=True)
-            if emulator_live:
-                live_game_id, _, _, _ = self._extract_live_current_game(summary)
+            live_game_id, _, _, _, live_decision = self._extract_live_current_game(summary)
+            if live_game_id > 0:
                 detected_game_id = live_game_id
-            elif detected_game_id <= 0:
+            elif (not emulator_live) and detected_game_id <= 0:
+                # En mode émulateur live, ne pas retomber sur le dernier jeu joué:
+                # sinon un jeu déchargé reste vu comme "Jeu chargé".
                 detected_game_id, _ = self._extract_last_played_game(summary)
             unlock_marker = self._extract_summary_unlock_marker(summary)
+            self._probe(
+                "event_probe_worker",
+                reason=reason,
+                emulator_live=emulator_live,
+                live_game_id=live_game_id,
+                live_decision=live_decision,
+                detected_game_id=detected_game_id,
+                unlock_marker=bool(unlock_marker),
+            )
         except (RetroAPIError, OSError, ValueError) as exc:
             diagnostic_error = self._format_diagnostic_error(exc)
+            self._probe(
+                "event_probe_worker_error",
+                reason=reason,
+                emulator_live=emulator_live,
+                live_game_id=live_game_id,
+                detected_game_id=detected_game_id,
+                error=diagnostic_error,
+            )
 
         self._queue_ui_callback(
             lambda: self._on_event_sync_probe_result(
@@ -3997,6 +4804,13 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if diagnostic_error:
             self._set_status_message(diagnostic_error)
             self._debug_log(f"_on_event_sync_probe_result diagnostic={diagnostic_error}")
+            self._probe(
+                "event_probe_result",
+                reason=reason,
+                branch="diagnostic_error",
+                detected_game_id=detected_game_id,
+                diagnostic_error=diagnostic_error,
+            )
             return
 
         if self._event_watch_username != username:
@@ -4007,6 +4821,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self._debug_log(
                 f"_on_event_sync_probe_result baseline user='{username}' game_id={detected_game_id}"
             )
+            self._probe(
+                "event_probe_result",
+                reason=reason,
+                branch="baseline",
+                detected_game_id=detected_game_id,
+            )
             return
 
         previous_game_id = self._event_watch_game_id
@@ -4016,6 +4836,16 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         forced_unload_refresh = ui_thinks_game_loaded and detected_game_id <= 0
         effective_game_changed = game_changed or forced_unload_refresh
         unlock_changed = bool(unlock_marker) and unlock_marker != self._event_watch_unlock_marker
+        self._probe(
+            "event_probe_result_eval",
+            reason=reason,
+            previous_game_id=previous_game_id,
+            detected_game_id=detected_game_id,
+            game_changed=game_changed,
+            forced_unload_refresh=forced_unload_refresh,
+            unlock_changed=unlock_changed,
+            ui_status=ui_status,
+        )
 
         if not effective_game_changed and not unlock_changed:
             self._event_watch_game_id = detected_game_id
@@ -4024,9 +4854,23 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 "Surveillance active: aucun nouveau succès ni changement de jeu.",
                 muted=True,
             )
+            self._probe(
+                "event_probe_result",
+                reason=reason,
+                branch="no_change",
+                detected_game_id=detected_game_id,
+                unlock_changed=unlock_changed,
+                forced_unload_refresh=forced_unload_refresh,
+            )
             return
 
         if self.sync_in_progress:
+            self._probe(
+                "event_probe_result",
+                reason=reason,
+                branch="sync_in_progress_reschedule",
+                detected_game_id=detected_game_id,
+            )
             self._request_event_sync(reason, delay_ms=700)
             return
 
@@ -4034,15 +4878,33 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             self._event_watch_game_id = detected_game_id
             self._event_watch_unlock_marker = unlock_marker
             if detected_game_id <= 0 and (previous_game_id > 0 or forced_unload_refresh):
+                # Applique immédiatement l'état visuel attendu sans attendre le refresh complet.
+                self._set_emulator_status_text(EMULATOR_STATUS_EMULATOR_LOADED)
                 self._debug_log(
                     "_on_event_sync_probe_result refresh rapide: jeu déchargé (retour état émulateur)"
                 )
                 self._set_status_message("Jeu déchargé: rafraîchissement rapide...", muted=True)
+                self._probe(
+                    "event_probe_result",
+                    reason=reason,
+                    branch="quick_refresh_unload",
+                    previous_game_id=previous_game_id,
+                    detected_game_id=detected_game_id,
+                    forced_unload_refresh=forced_unload_refresh,
+                )
             else:
                 self._debug_log(
                     f"_on_event_sync_probe_result refresh rapide: changement de jeu game_id={detected_game_id}"
                 )
                 self._set_status_message("Changement de jeu détecté: rafraîchissement rapide...", muted=True)
+                self._probe(
+                    "event_probe_result",
+                    reason=reason,
+                    branch="quick_refresh_game_change",
+                    previous_game_id=previous_game_id,
+                    detected_game_id=detected_game_id,
+                    forced_unload_refresh=forced_unload_refresh,
+                )
             self.refresh_dashboard(show_errors=False, sync_before_refresh=False)
             return
 
@@ -4054,6 +4916,15 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._debug_log(
             f"_on_event_sync_probe_result déclenche sync: reason='{trigger_reason}' "
             f"game_id={detected_game_id}"
+        )
+        self._probe(
+            "event_probe_result",
+            reason=reason,
+            branch="trigger_sync",
+            trigger_reason=trigger_reason,
+            detected_game_id=detected_game_id,
+            unlock_changed=unlock_changed,
+            game_changed=game_changed,
         )
         self._event_pending_game_id = detected_game_id
         self._event_pending_unlock_marker = unlock_marker
@@ -4140,6 +5011,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     ) -> None:
         if self.is_closing or not self._has_valid_connection():
             return
+        if self.current_game_fetch_in_progress:
+            return
         if self.event_sync_job is not None:
             if delay_ms <= 0:
                 self._request_event_sync(reason, delay_ms=0)
@@ -4169,7 +5042,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             return
         api_key = self.api_key.get().strip()
         username = self._tracked_username()
-        emulator_live = self._is_emulator_live()
+        emulator_live = self._is_emulator_process_live()
         if not api_key or not username:
             self._set_status_message(self._connection_diagnostic())
             return
@@ -4196,9 +5069,13 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     # Method: _current_window_geometry - Réalise le traitement lié à current window geometry.
     def _current_window_geometry(self) -> str:
         try:
-            if self.root.state() == "iconic":
+            state = self.root.state()
+            if state == "iconic":
                 return ""
-            geometry = self.root.winfo_geometry().strip()
+            # wm_geometry est plus stable sur Windows quand la fenêtre est maximisée.
+            geometry = self.root.wm_geometry().strip()
+            if not WINDOW_GEOMETRY_RE.fullmatch(geometry):
+                geometry = self.root.winfo_geometry().strip()
         except TclError:
             return ""
         if not WINDOW_GEOMETRY_RE.fullmatch(geometry):
@@ -4215,11 +5092,13 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             "startup_init_job",
             "startup_finish_job",
             "startup_connection_job",
+            "saved_window_geometry_apply_job",
             "emulator_poll_job",
             "emulator_status_refresh_job",
             "current_game_loading_timeout_job",
             "current_game_loading_hard_timeout_job",
             "current_game_achievement_scroll_job",
+            "current_game_clicked_achievement_restore_job",
         ):
             job_id = getattr(self, job_name, None)
             if job_id is None:
@@ -4229,6 +5108,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             except TclError:
                 pass
             setattr(self, job_name, None)
+        self._saved_window_geometry_pending = ""
+        self._saved_window_geometry_retry_remaining = 0
         self.emulator_probe_in_progress = False
         self.event_probe_in_progress = False
 
@@ -4274,6 +5155,9 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def _refresh_connection_summary(self) -> None:
         username = self._tracked_username() or "(non configuré)"
         self.connection_summary.set(f"Compte: {username}")
+        if self.profile_button is not None:
+            profile_label = self._tracked_username().strip() or "Profil"
+            self.profile_button.configure(text=profile_label)
         if self.connection_button is not None:
             label = "Connecté" if self._has_saved_valid_connection() else "Connexion"
             self.connection_button.configure(text=label)
@@ -4457,6 +5341,86 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         except TclError:
             return
 
+    # Method: _paint_rounded_top_tab_image - Dessine une pastille d'onglet avec coins arrondis en haut.
+    def _paint_rounded_top_tab_image(
+        self,
+        image: PhotoImage,
+        color: str,
+        radius: int = 10,
+        side_gap: int = 3,
+    ) -> None:
+        width = max(1, int(image.width()))
+        height = max(1, int(image.height()))
+        gap = max(0, min(side_gap, max(0, (width // 2) - 1)))
+        shape_width = max(2, width - (gap * 2))
+        rad = max(2, min(radius, shape_width // 2, height - 1))
+        image.blank()
+        for y in range(height):
+            left = gap
+            right = (width - 1) - gap
+            if y < rad:
+                dy = (rad - 1) - y
+                dx = int((max(0, (rad * rad) - (dy * dy))) ** 0.5)
+                cut = max(0, rad - dx)
+                left = gap + cut
+                right = (width - 1) - gap - cut
+            if right >= left:
+                image.put(color, to=(left, y, right + 1, y + 1))
+
+    # Method: _ensure_rounded_notebook_tab_element - Crée/actualise l'élément graphique des onglets arrondis.
+    def _ensure_rounded_notebook_tab_element(self, normal_bg: str, selected_bg: str, disabled_bg: str) -> None:
+        # Keep rounded corners with a compact tab size.
+        tab_w = 32
+        tab_h = 20
+        tab_side_gap = max(0, NOTEBOOK_TAB_SECTION_GAP // 2)
+        if self._notebook_tab_image_normal is None:
+            self._notebook_tab_image_normal = PhotoImage(width=tab_w, height=tab_h)
+        if self._notebook_tab_image_selected is None:
+            self._notebook_tab_image_selected = PhotoImage(width=tab_w, height=tab_h)
+        if self._notebook_tab_image_disabled is None:
+            self._notebook_tab_image_disabled = PhotoImage(width=tab_w, height=tab_h)
+
+        self._paint_rounded_top_tab_image(self._notebook_tab_image_normal, normal_bg, side_gap=tab_side_gap)
+        self._paint_rounded_top_tab_image(self._notebook_tab_image_selected, selected_bg, side_gap=tab_side_gap)
+        self._paint_rounded_top_tab_image(self._notebook_tab_image_disabled, disabled_bg, side_gap=tab_side_gap)
+
+        element_name = "PyRARoundedTab"
+        try:
+            if element_name not in self.style.element_names():
+                self.style.element_create(
+                    element_name,
+                    "image",
+                    self._notebook_tab_image_normal,
+                    ("selected", self._notebook_tab_image_selected),
+                    ("disabled", self._notebook_tab_image_disabled),
+                    border=(8, 6, 8, 0),
+                    sticky="nsew",
+                )
+        except TclError:
+            return
+
+        self._safe_style_layout(
+            "Borderless.TNotebook.Tab",
+            [
+                (
+                    element_name,
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            (
+                                "Notebook.padding",
+                                {
+                                    "side": "top",
+                                    "sticky": "nswe",
+                                    "children": [("Notebook.label", {"side": "top", "sticky": ""})],
+                                },
+                            )
+                        ],
+                    },
+                )
+            ],
+        )
+
     # Method: _apply_theme - Applique les paramètres ou la transformation nécessaires.
     def _apply_theme(self, mode: str) -> None:
         if mode == "dark":
@@ -4467,8 +5431,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 "field_bg": "#262c34",
                 "field_fg": "#e8ebef",
                 "current_summary_bg": "#14191f",
-                "current_next_bg": "#12171d",
-                "current_gallery_bg": "#10151b",
+                "current_next_bg": "#14191f",
+                "current_gallery_bg": "#14191f",
                 "accent": "#3b82f6",
                 "accent_hover": "#60a5fa",
                 "selected_bg": "#2f5f9b",
@@ -4489,8 +5453,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                 "field_bg": "#ffffff",
                 "field_fg": "#1f2937",
                 "current_summary_bg": "#bcc9da",
-                "current_next_bg": "#b5c4d6",
-                "current_gallery_bg": "#afbfd2",
+                "current_next_bg": "#bcc9da",
+                "current_gallery_bg": "#bcc9da",
                 "accent": "#2563eb",
                 "accent_hover": "#3b82f6",
                 "selected_bg": "#dbeafe",
@@ -4506,6 +5470,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
 
         self.theme_colors = dict(colors)
         self.root.configure(bg=colors["root_bg"])
+        section_bg = colors["current_summary_bg"]
 
         self._safe_style_configure(
             ".",
@@ -4536,6 +5501,9 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             borderwidth=0,
             relief="flat",
         )
+        # Tk/ttk ne gère pas un vrai alpha transparent pour les Frames:
+        # on utilise le fond racine pour un rendu visuellement transparent.
+        self._safe_style_configure("MainTabBar.TFrame", background=colors["root_bg"])
         self._safe_style_configure(
             "StatusTabInactive.TLabel",
             background=colors["panel_bg"],
@@ -4556,25 +5524,25 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         )
         self._safe_style_configure(
             "CurrentGameTitle.TLabel",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             foreground=title_color,
             font=("Segoe UI", 11, "bold"),
         )
         self._safe_style_configure(
             "CurrentSourceUnknown.TLabel",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             foreground=colors["text"],
             font=("Segoe UI", 9, "bold"),
         )
         self._safe_style_configure(
             "CurrentSourceLive.TLabel",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             foreground=source_live_color,
             font=("Segoe UI", 9, "bold"),
         )
         self._safe_style_configure(
             "CurrentSourceFallback.TLabel",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             foreground=source_fallback_color,
             font=("Segoe UI", 9, "bold"),
         )
@@ -4586,54 +5554,55 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             font=("Segoe UI", 9, "bold"),
         )
         self._safe_style_configure("ThemeToggleSep.TLabel", background=colors["root_bg"], foreground=colors["text"])
-        self._safe_style_configure("CurrentSummary.TFrame", background=colors["current_summary_bg"])
-        self._safe_style_configure("CurrentSummary.TLabel", background=colors["current_summary_bg"], foreground=colors["text"])
+        self._safe_style_configure("CurrentTab.TFrame", background=section_bg)
+        self._safe_style_configure("CurrentSummary.TFrame", background=section_bg)
+        self._safe_style_configure("CurrentSummary.TLabel", background=section_bg, foreground=colors["text"])
         self._safe_style_configure(
             "CurrentSummary.TLabelframe",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             borderwidth=0,
             relief="flat",
             labelmargins=(14, 8, 14, 2),
         )
         self._safe_style_configure(
             "CurrentSummary.TLabelframe.Label",
-            background=colors["current_summary_bg"],
+            background=section_bg,
             foreground=colors["text"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11, "bold"),
             padding=(10, 8, 10, 4),
         )
 
-        self._safe_style_configure("CurrentNext.TFrame", background=colors["current_next_bg"])
-        self._safe_style_configure("CurrentNext.TLabel", background=colors["current_next_bg"], foreground=colors["text"])
+        self._safe_style_configure("CurrentNext.TFrame", background=section_bg)
+        self._safe_style_configure("CurrentNext.TLabel", background=section_bg, foreground=colors["text"])
         self._safe_style_configure(
             "CurrentNext.TLabelframe",
-            background=colors["current_next_bg"],
+            background=section_bg,
             borderwidth=0,
             relief="flat",
             labelmargins=(14, 8, 14, 2),
         )
         self._safe_style_configure(
             "CurrentNext.TLabelframe.Label",
-            background=colors["current_next_bg"],
+            background=section_bg,
             foreground=colors["text"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11, "bold"),
             padding=(10, 8, 10, 4),
         )
 
-        self._safe_style_configure("CurrentGallery.TFrame", background=colors["current_gallery_bg"])
-        self._safe_style_configure("CurrentGallery.TLabel", background=colors["current_gallery_bg"], foreground=colors["text"])
+        self._safe_style_configure("CurrentGallery.TFrame", background=section_bg)
+        self._safe_style_configure("CurrentGallery.TLabel", background=section_bg, foreground=colors["text"])
         self._safe_style_configure(
             "CurrentGallery.TLabelframe",
-            background=colors["current_gallery_bg"],
+            background=section_bg,
             borderwidth=0,
             relief="flat",
             labelmargins=(14, 8, 14, 2),
         )
         self._safe_style_configure(
             "CurrentGallery.TLabelframe.Label",
-            background=colors["current_gallery_bg"],
+            background=section_bg,
             foreground=colors["text"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11, "bold"),
             padding=(10, 8, 10, 4),
         )
 
@@ -4644,7 +5613,12 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             borderwidth=0,
             relief="flat",
         )
-        self._safe_style_configure("TLabelframe.Label", background=colors["root_bg"], foreground=colors["text"])
+        self._safe_style_configure(
+            "TLabelframe.Label",
+            background=colors["root_bg"],
+            foreground=colors["text"],
+            font=("Segoe UI", 10, "bold"),
+        )
         self._safe_style_configure(
             "TButton",
             background=colors["panel_bg"],
@@ -4658,18 +5632,18 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._safe_style_map("TButton", background=[("active", colors["accent_hover"]), ("pressed", colors["accent"])])
         self._safe_style_configure(
             "CurrentNext.TButton",
-            background=colors["root_bg"],
+            background=colors["panel_bg"],
             foreground=colors["text"],
             borderwidth=0,
             relief="flat",
             focusthickness=0,
-            focuscolor=colors["root_bg"],
+            focuscolor=colors["panel_bg"],
             padding=button_padding,
         )
         self._safe_style_map(
             "CurrentNext.TButton",
             background=[
-                ("disabled", colors["root_bg"]),
+                ("disabled", colors["panel_bg"]),
                 ("active", colors["accent_hover"]),
                 ("pressed", colors["accent"]),
             ],
@@ -4719,10 +5693,57 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             focusthickness=0,
         )
 
-        selected_tab_bg = colors["current_summary_bg"]
+        selected_tab_bg = section_bg
+        selected_tab_fg = colors["text"]
         normal_tab_bg = colors["panel_bg"]
 
-        self._safe_style_configure("TNotebook", background=colors["root_bg"], borderwidth=0, relief="flat")
+        self._safe_style_configure(
+            "MainTab.TButton",
+            background=normal_tab_bg,
+            foreground=colors["text"],
+            borderwidth=0,
+            relief="flat",
+            focusthickness=0,
+            focuscolor=normal_tab_bg,
+            padding=button_padding,
+        )
+        self._safe_style_map(
+            "MainTab.TButton",
+            background=[
+                ("disabled", normal_tab_bg),
+                ("active", colors["accent_hover"]),
+                ("pressed", colors["accent"]),
+            ],
+            foreground=[("disabled", status_muted_color)],
+        )
+        self._safe_style_configure(
+            "MainTabSelected.TButton",
+            background=colors["panel_bg"],
+            foreground=title_color,
+            borderwidth=0,
+            relief="flat",
+            focusthickness=0,
+            focuscolor=colors["panel_bg"],
+            padding=button_padding,
+        )
+        self._safe_style_map(
+            "MainTabSelected.TButton",
+            background=[
+                ("disabled", colors["panel_bg"]),
+                ("active", colors["accent_hover"]),
+                ("pressed", colors["accent"]),
+            ],
+            foreground=[("disabled", status_muted_color)],
+        )
+
+        self._safe_style_configure(
+            "TNotebook",
+            background=colors["root_bg"],
+            borderwidth=0,
+            relief="flat",
+            padding=0,
+            tabmargins=(0, 0, 0, 0),
+        )
         self._safe_style_configure(
             "TNotebook.Tab",
             background=normal_tab_bg,
@@ -4736,7 +5757,8 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             background=colors["root_bg"],
             borderwidth=0,
             relief="flat",
-            tabmargins=(0, 0, 0, 0),
+            padding=0,
+            tabmargins=(0, 0, 0, -2),
             lightcolor=colors["root_bg"],
             darkcolor=colors["root_bg"],
             bordercolor=colors["root_bg"],
@@ -4745,7 +5767,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             "Borderless.TNotebook.Tab",
             background=normal_tab_bg,
             foreground=colors["text"],
-            padding=(16, 7),
+            padding=(10, 4, 10, 4),
             borderwidth=0,
             relief="flat",
             focuscolor=normal_tab_bg,
@@ -4756,12 +5778,16 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         self._safe_style_map(
             "TNotebook.Tab",
             background=[("selected", selected_tab_bg), ("!selected", normal_tab_bg)],
-            foreground=[("selected", colors["text"]), ("!selected", colors["text"])],
+            foreground=[("selected", selected_tab_fg), ("!selected", colors["text"])],
+            padding=[("selected", (10, 4, 10, 4)), ("!selected", (10, 4, 10, 4)), ("disabled", (10, 4, 10, 4))],
+            expand=[("selected", (0, 0, 0, 0)), ("!selected", (0, 0, 0, 0)), ("disabled", (0, 0, 0, 0))],
         )
         self._safe_style_map(
             "Borderless.TNotebook.Tab",
             background=[("selected", selected_tab_bg), ("!selected", normal_tab_bg)],
-            foreground=[("selected", colors["text"]), ("!selected", colors["text"])],
+            foreground=[("selected", selected_tab_fg), ("!selected", colors["text"])],
+            padding=[("selected", (10, 4, 10, 4)), ("!selected", (10, 4, 10, 4)), ("disabled", (10, 4, 10, 4))],
+            expand=[("selected", (0, 0, 0, 0)), ("!selected", (0, 0, 0, 0)), ("disabled", (0, 0, 0, 0))],
             lightcolor=[("selected", selected_tab_bg), ("!selected", normal_tab_bg)],
             darkcolor=[("selected", selected_tab_bg), ("!selected", normal_tab_bg)],
             bordercolor=[("selected", selected_tab_bg), ("!selected", normal_tab_bg)],
@@ -4771,17 +5797,10 @@ class TrackerApp(ParsingMixin, AchievementMixin):
             "Borderless.TNotebook",
             [("Notebook.client", {"sticky": "nswe"})],
         )
-        self._safe_style_layout(
-            "Borderless.TNotebook.Tab",
-            [
-                (
-                    "Notebook.padding",
-                    {
-                        "sticky": "nswe",
-                        "children": [("Notebook.label", {"side": "top", "sticky": ""})],
-                    },
-                )
-            ],
+        self._ensure_rounded_notebook_tab_element(
+            normal_bg=normal_tab_bg,
+            selected_bg=selected_tab_bg,
+            disabled_bg=normal_tab_bg,
         )
 
         self._safe_style_configure(
@@ -5293,7 +6312,16 @@ class TrackerApp(ParsingMixin, AchievementMixin):
         if not latest:
             self._debug_log("refresh_dashboard: aucun snapshot local.")
             if self._has_valid_connection():
-                emulator_live = self._is_emulator_live()
+                emulator_live = self._is_emulator_process_live()
+                if emulator_live and not show_errors:
+                    self._debug_log("refresh_dashboard fallback API jeu en cours (émulateur déjà chargé).")
+                    self.status_text.set("Aucune donnée locale. Détection du jeu en cours via l'API...")
+                    self._update_current_game_tab(
+                        {"games": [], "recent_achievements": []},
+                        username,
+                        force_refresh=(show_errors or force_current_game_refresh),
+                    )
+                    return
                 if not emulator_live:
                     self._debug_log("refresh_dashboard fallback API dernier jeu (émulateur inactif).")
                     self.status_text.set("Aucune donnée locale. Récupération du dernier jeu via l'API...")
@@ -5309,7 +6337,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
                     self.status_text.set("Synchronisation en cours...")
                     return
                 if self._has_valid_connection():
-                    emulator_live = self._is_emulator_live()
+                    emulator_live = self._is_emulator_process_live()
                     if not emulator_live:
                         self._debug_log("refresh_dashboard fallback API dernier jeu (show_errors=True).")
                         self.status_text.set("Aucune donnée locale. Récupération du dernier jeu via l'API...")
@@ -5432,7 +6460,7 @@ class TrackerApp(ParsingMixin, AchievementMixin):
     def show_about(self) -> None:
         messagebox.showinfo(
             "À propos",
-            "PyRA\nRetroachievement Tracker\nApplication desktop de suivi RetroAchievements.",
+            "PyRA\nSuivi RetroAchievements\nApplication de bureau de suivi RetroAchievements.",
         )
 
     # Method: open_data_folder - Ouvre l'élément demandé.
