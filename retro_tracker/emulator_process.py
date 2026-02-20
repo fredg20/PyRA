@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import csv
 import io
+import os
 import subprocess
+from ctypes import wintypes
 
 
 RA_EMULATOR_PROBE_DEFINITIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -45,7 +48,14 @@ def process_matches_ra_emulator(
     return any(hint in normalized for hint in hints)
 
 
-def list_running_process_names(timeout_seconds: int = 3) -> list[str]:
+def _safe_int(value: object) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _list_running_process_rows(timeout_seconds: int = 3) -> list[list[str]]:
     create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         result = subprocess.run(
@@ -62,21 +72,26 @@ def list_running_process_names(timeout_seconds: int = 3) -> list[str]:
         return []
     if result.returncode != 0 or not result.stdout:
         return []
+    return [row for row in csv.reader(io.StringIO(result.stdout)) if row]
 
-    names: list[str] = []
-    reader = csv.reader(io.StringIO(result.stdout))
-    for row in reader:
-        if not row:
-            continue
-        name = row[0].strip()
+
+def list_running_process_entries(timeout_seconds: int = 3) -> list[tuple[str, int]]:
+    entries: list[tuple[str, int]] = []
+    for row in _list_running_process_rows(timeout_seconds=timeout_seconds):
+        name = row[0].strip() if row else ""
+        pid = _safe_int(row[1]) if len(row) > 1 else 0
         if name:
-            names.append(name)
-    return names
+            entries.append((name, pid))
+    return entries
+
+
+def list_running_process_names(timeout_seconds: int = 3) -> list[str]:
+    return [name for name, _ in list_running_process_entries(timeout_seconds=timeout_seconds)]
 
 
 def detect_ra_emulator_probe_matches(timeout_seconds: int = 3) -> dict[str, list[str]]:
-    process_names = list_running_process_names(timeout_seconds=timeout_seconds)
-    normalized_pairs = [(name, _normalize_process_name(name)) for name in process_names]
+    process_entries = list_running_process_entries(timeout_seconds=timeout_seconds)
+    normalized_pairs = [(name, _normalize_process_name(name)) for name, _ in process_entries]
     probe_matches: dict[str, list[str]] = {}
     for probe_name, hints in RA_EMULATOR_PROBE_DEFINITIONS:
         matches: list[str] = []
@@ -103,3 +118,119 @@ def detect_ra_emulator_live(
         return any(states.values())
     process_names = list_running_process_names(timeout_seconds=timeout_seconds)
     return any(process_matches_ra_emulator(name, hints=hints) for name in process_names)
+
+
+def _enumerate_visible_window_titles_by_pid() -> dict[int, str]:
+    if os.name != "nt":
+        return {}
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+    except OSError:
+        return {}
+
+    enum_windows = user32.EnumWindows
+    enum_windows.argtypes = [ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM), wintypes.LPARAM]
+    enum_windows.restype = wintypes.BOOL
+    is_window_visible = user32.IsWindowVisible
+    is_window_visible.argtypes = [wintypes.HWND]
+    is_window_visible.restype = wintypes.BOOL
+    get_window_text_length = user32.GetWindowTextLengthW
+    get_window_text_length.argtypes = [wintypes.HWND]
+    get_window_text_length.restype = ctypes.c_int
+    get_window_text = user32.GetWindowTextW
+    get_window_text.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    get_window_text.restype = ctypes.c_int
+    get_window_thread_process_id = user32.GetWindowThreadProcessId
+    get_window_thread_process_id.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    get_window_thread_process_id.restype = wintypes.DWORD
+
+    titles_by_pid: dict[int, str] = {}
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: wintypes.HWND, _lparam: wintypes.LPARAM) -> wintypes.BOOL:
+        try:
+            if not is_window_visible(hwnd):
+                return True
+            text_len = int(get_window_text_length(hwnd))
+            if text_len <= 0:
+                return True
+            text_buffer = ctypes.create_unicode_buffer(text_len + 1)
+            copied = int(get_window_text(hwnd, text_buffer, text_len + 1))
+            if copied <= 0:
+                return True
+            title = text_buffer.value.strip()
+            if not title:
+                return True
+            pid_ref = wintypes.DWORD(0)
+            get_window_thread_process_id(hwnd, ctypes.byref(pid_ref))
+            pid_value = int(pid_ref.value)
+            if pid_value <= 0:
+                return True
+            previous = titles_by_pid.get(pid_value, "")
+            if len(title) > len(previous):
+                titles_by_pid[pid_value] = title
+        except Exception:
+            return True
+        return True
+
+    try:
+        enum_windows(callback, 0)
+    except Exception:
+        return {}
+    return titles_by_pid
+
+
+def _retroarch_title_indicates_game_loaded(title: str) -> bool:
+    normalized = " ".join(title.split()).casefold()
+    if not normalized:
+        return False
+    if normalized in {"retroarch", "retroarch menu", "retroarch - menu"}:
+        return False
+    if normalized.startswith("retroarch "):
+        trailing = normalized[len("retroarch ") :].strip(" -")
+        return bool(trailing)
+    if normalized.startswith("retroarch - "):
+        trailing = normalized[len("retroarch - ") :].strip()
+        return bool(trailing) and trailing not in {"menu", "main menu"}
+    return False
+
+
+def detect_ra_emulator_game_probe_states(
+    probe_matches: dict[str, list[str]] | None = None,
+    timeout_seconds: int = 3,
+) -> dict[str, bool]:
+    states: dict[str, bool] = {probe_name: False for probe_name, _ in RA_EMULATOR_PROBE_DEFINITIONS}
+    effective_matches = probe_matches if isinstance(probe_matches, dict) else detect_ra_emulator_probe_matches(
+        timeout_seconds=timeout_seconds
+    )
+    if not any(bool(matches) for matches in effective_matches.values()):
+        return states
+
+    process_entries = list_running_process_entries(timeout_seconds=timeout_seconds)
+    if not process_entries:
+        return states
+    title_by_pid = _enumerate_visible_window_titles_by_pid()
+    if not title_by_pid:
+        return states
+
+    normalized_entries = [
+        (name, pid, _normalize_process_name(name))
+        for name, pid in process_entries
+        if name and pid > 0
+    ]
+
+    for probe_name, hints in RA_EMULATOR_PROBE_DEFINITIONS:
+        if probe_name != "retroarch":
+            continue
+        if not effective_matches.get(probe_name):
+            continue
+        titles: list[str] = []
+        for _raw_name, pid, normalized in normalized_entries:
+            if not normalized or not any(hint in normalized for hint in hints):
+                continue
+            title = title_by_pid.get(pid, "").strip()
+            if title:
+                titles.append(title)
+        states[probe_name] = any(_retroarch_title_indicates_game_loaded(title) for title in titles)
+
+    return states

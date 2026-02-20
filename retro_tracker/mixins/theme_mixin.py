@@ -331,6 +331,13 @@ class ThemeMixin:
             font=("Segoe UI", 11, "bold"),
             padding=(10, 8, 10, 4),
         )
+        self._safe_style_configure(
+            "CurrentNext.Horizontal.TProgressbar",
+            troughcolor=section_bg,
+            background=colors["accent"],
+            borderwidth=0,
+            relief="flat",
+        )
 
         self._safe_style_configure("CurrentGallery.TFrame", background=section_bg)
         self._safe_style_configure("CurrentGallery.TLabel", background=section_bg, foreground=colors["text"])
@@ -630,7 +637,7 @@ class ThemeMixin:
         )
 
         if self.connection_window is not None and self.connection_window.winfo_exists():
-            self.connection_window.configure(bg=colors["root_bg"])
+            self.connection_window.configure(bg=colors["panel_bg"], bd=0, highlightthickness=0, padx=0, pady=0)
         if self.profile_window is not None and self.profile_window.winfo_exists():
             self.profile_window.configure(bg=colors["root_bg"])
         if self.current_game_achievements_canvas is not None:
@@ -651,10 +658,6 @@ class ThemeMixin:
                 pass
         if self.current_game_achievement_tooltip_label is not None:
             self.current_game_achievement_tooltip_label.configure(style="Tooltip.TLabel")
-        if self.maintenance_tab_tooltip_label is not None:
-            self.maintenance_tab_tooltip_label.configure(style="Tooltip.TLabel")
-        if self.profile_maintenance_tooltip_label is not None:
-            self.profile_maintenance_tooltip_label.configure(style="Tooltip.TLabel")
         self._set_current_game_source(self.current_game_source.get())
         self._refresh_emulator_status_tab()
         modal = self._active_modal_window()

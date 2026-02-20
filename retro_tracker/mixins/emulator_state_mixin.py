@@ -5,8 +5,10 @@ import time
 from tkinter import TclError
 
 from retro_tracker.emulator_process import (
+    detect_ra_emulator_game_probe_states,
     detect_ra_emulator_probe_matches,
 )
+from retro_tracker.measured_runtime_probe import probe_runtime_measured_progress
 from retro_tracker.runtime_constants import (
     EMULATOR_POLL_IMMEDIATE_INTERVAL_MS,
     EMULATOR_POLL_INTERVAL_MS,
@@ -34,10 +36,16 @@ class EmulatorStateMixin:
             )
 
     # Method: _probe_each_emulator_game_load - Émet une sonde "jeu chargé" pour chaque émulateur.
-    def _probe_each_emulator_game_load(self, probe_matches: dict[str, list[str]], stage: str) -> None:
+    def _probe_each_emulator_game_load(
+        self,
+        probe_matches: dict[str, list[str]],
+        stage: str,
+        game_probe_states: dict[str, bool] | None = None,
+    ) -> None:
         ui_status = self.emulator_status_text.get().strip().casefold()
         source_value = ""
         source_live = False
+        runtime_states = game_probe_states if isinstance(game_probe_states, dict) else {}
         try:
             source_value = self.current_game_source.get().strip()  # type: ignore[attr-defined]
         except Exception:
@@ -54,22 +62,32 @@ class EmulatorStateMixin:
         for emulator_name in sorted(probe_matches.keys()):
             matches = probe_matches.get(emulator_name, [])
             live = bool(matches)
+            runtime_loaded = bool(runtime_states.get(emulator_name, False))
             if not live:
                 state = "inactive"
                 game_loaded = False
                 confidence = "high"
+                source_hint = source_value or "-"
+            elif runtime_loaded:
+                state = "game_loaded"
+                game_loaded = True
+                confidence = "high"
+                source_hint = "Sonde runtime émulateur"
             elif not game_loaded_global:
                 state = "emulator_loaded"
                 game_loaded = False
                 confidence = "high"
+                source_hint = source_value or "-"
             elif single_active:
                 game_loaded = (single_active == emulator_name)
                 state = "game_loaded" if game_loaded else "emulator_loaded"
                 confidence = "high"
+                source_hint = source_value or "-"
             else:
                 game_loaded = True
                 state = "ambiguous"
                 confidence = "low"
+                source_hint = source_value or "-"
 
             self._probe(
                 f"emulator_game_probe_{emulator_name}",
@@ -77,8 +95,9 @@ class EmulatorStateMixin:
                 state=state,
                 live=live,
                 game_loaded=game_loaded,
+                runtime_loaded=runtime_loaded,
                 confidence=confidence,
-                source=source_value or "-",
+                source=source_hint,
                 matches=", ".join(matches[:3]) if matches else "-",
             )
 
@@ -129,6 +148,40 @@ class EmulatorStateMixin:
                 matches=", ".join(matches[:3]) if matches else "-",
             )
 
+    # Method: _probe_each_emulator_measured - Émet une sonde dédiée "measured runtime" pour chaque émulateur.
+    def _probe_each_emulator_measured(
+        self,
+        probe_matches: dict[str, list[str]],
+        stage: str,
+        measured_event: dict[str, str] | None,
+    ) -> None:
+        measured_emulator = ""
+        measured_id = 0
+        measured_percent = ""
+        measured_source = ""
+        if isinstance(measured_event, dict):
+            measured_emulator = str(measured_event.get("emulator", "")).strip().casefold()
+            measured_id = self._safe_int(measured_event.get("achievement_id"))  # type: ignore[attr-defined]
+            measured_percent = str(measured_event.get("measured_percent", "")).strip()
+            measured_source = str(measured_event.get("source", "")).strip()
+
+        for emulator_name in sorted(probe_matches.keys()):
+            matches = probe_matches.get(emulator_name, [])
+            live = bool(matches)
+            has_measured = live and measured_emulator == emulator_name.casefold() and bool(measured_event)
+            state = "measured" if has_measured else ("idle" if live else "inactive")
+            self._probe(
+                f"emulator_measured_probe_{emulator_name}",
+                stage=stage,
+                state=state,
+                live=live,
+                measured=has_measured,
+                achievement_id=(measured_id if has_measured else 0),
+                percent=(measured_percent if has_measured else "-"),
+                source=(measured_source if has_measured else "-"),
+                matches=", ".join(matches[:3]) if matches else "-",
+            )
+
     def _is_emulator_live_status_text(self, status_text: str) -> bool:
         normalized = status_text.strip().casefold()
         return normalized in {
@@ -160,18 +213,33 @@ class EmulatorStateMixin:
     def _prime_emulator_status_on_startup(self) -> None:
         is_live = False
         probe_matches: dict[str, list[str]] = {}
+        game_probe_states: dict[str, bool] = {}
         try:
             probe_matches = detect_ra_emulator_probe_matches()
             is_live = any(bool(matches) for matches in probe_matches.values())
+            game_probe_states = detect_ra_emulator_game_probe_states(probe_matches=probe_matches)
         except Exception:
             is_live = False
             probe_matches = {}
+            game_probe_states = {}
         if probe_matches:
             self._last_emulator_probe_matches = {name: list(matches) for name, matches in probe_matches.items()}
+            self._last_emulator_probe_game_load_states = dict(game_probe_states)
             self._probe_each_emulator(probe_matches, stage="startup")
-            self._probe_each_emulator_game_load(probe_matches, stage="startup")
+            self._probe_each_emulator_game_load(
+                probe_matches,
+                stage="startup",
+                game_probe_states=game_probe_states,
+            )
         self._last_emulator_probe_live = is_live
-        next_status = EMULATOR_STATUS_EMULATOR_LOADED if is_live else EMULATOR_STATUS_INACTIVE
+        runtime_game_loaded = any(
+            bool(game_probe_states.get(name, False)) and bool(matches)
+            for name, matches in probe_matches.items()
+        )
+        if not is_live:
+            next_status = EMULATOR_STATUS_INACTIVE
+        else:
+            next_status = EMULATOR_STATUS_GAME_LOADED if runtime_game_loaded else EMULATOR_STATUS_EMULATOR_LOADED
         self._set_emulator_status_text(next_status)
         self._emulator_probe_candidate_live = None
         self._emulator_probe_candidate_count = 0
@@ -292,25 +360,65 @@ class EmulatorStateMixin:
     def _emulator_probe_worker(self) -> None:
         is_live = False
         probe_matches: dict[str, list[str]] = {}
+        game_probe_states: dict[str, bool] = {}
+        measured_state: dict[str, object] = {}
+        measured_event: dict[str, str] | None = None
         try:
             probe_matches = detect_ra_emulator_probe_matches()
             is_live = any(bool(matches) for matches in probe_matches.values())
+            game_probe_states = detect_ra_emulator_game_probe_states(probe_matches=probe_matches)
         except Exception:
             is_live = False
             probe_matches = {}
+            game_probe_states = {}
+        state_snapshot = self._measured_probe_state if isinstance(self._measured_probe_state, dict) else {}
+        try:
+            measured_state, measured_event = probe_runtime_measured_progress(probe_matches, state=state_snapshot)
+        except Exception:
+            measured_state = dict(state_snapshot)
+            measured_event = None
         self._queue_ui_callback(
-            lambda live=is_live, matches=probe_matches: self._on_emulator_probe_result(live, matches)
+            lambda live=is_live, matches=probe_matches, g_states=game_probe_states, m_state=measured_state, m_event=measured_event: self._on_emulator_probe_result(
+                live,
+                matches,
+                g_states,
+                m_state,
+                m_event,
+            )
         )
 
     # Method: _on_emulator_probe_result - Applique le résultat de détection et relance le polling.
-    def _on_emulator_probe_result(self, is_live: bool, probe_matches: dict[str, list[str]] | None = None) -> None:
+    def _on_emulator_probe_result(
+        self,
+        is_live: bool,
+        probe_matches: dict[str, list[str]] | None = None,
+        game_probe_states: dict[str, bool] | None = None,
+        measured_state: dict[str, object] | None = None,
+        measured_event: dict[str, str] | None = None,
+    ) -> None:
         self.emulator_probe_in_progress = False
         self._last_emulator_probe_live = is_live
+        if isinstance(measured_state, dict):
+            self._measured_probe_state = measured_state
+        runtime_states = game_probe_states if isinstance(game_probe_states, dict) else {}
+        self._last_emulator_probe_game_load_states = dict(runtime_states)
         if probe_matches:
             self._last_emulator_probe_matches = {name: list(matches) for name, matches in probe_matches.items()}
             self._probe_each_emulator(probe_matches, stage="poll")
-            self._probe_each_emulator_game_load(probe_matches, stage="poll")
+            self._probe_each_emulator_game_load(
+                probe_matches,
+                stage="poll",
+                game_probe_states=runtime_states,
+            )
+            self._probe_each_emulator_measured(probe_matches, stage="poll", measured_event=measured_event)
+        self._on_runtime_measured_probe_result(measured_event)  # type: ignore[attr-defined]
         status_before = self.emulator_status_text.get().strip().casefold()
+        runtime_game_loaded = False
+        if probe_matches:
+            runtime_game_loaded = any(
+                bool(runtime_states.get(name, False)) and bool(matches)
+                for name, matches in probe_matches.items()
+            )
         fast_reprobe_needed = False
         current_live = self._is_emulator_live()
         self._probe(
@@ -335,6 +443,15 @@ class EmulatorStateMixin:
                 self._set_emulator_status(is_live)
                 fast_reprobe_needed = is_live
 
+        if is_live:
+            status_now = self.emulator_status_text.get().strip().casefold()
+            if runtime_game_loaded and status_now != EMULATOR_STATUS_GAME_LOADED.casefold():
+                self._set_emulator_status_text(EMULATOR_STATUS_GAME_LOADED)
+                fast_reprobe_needed = True
+            elif (not runtime_game_loaded) and status_now == EMULATOR_STATUS_GAME_LOADED.casefold():
+                self._set_emulator_status_text(EMULATOR_STATUS_EMULATOR_LOADED)
+                fast_reprobe_needed = True
+
         effective_live = self._is_emulator_process_live()
         if self._has_valid_connection():
             ui_status = self.emulator_status_text.get().strip().casefold()
@@ -356,6 +473,7 @@ class EmulatorStateMixin:
             status_after=status_after,
             fast_reprobe=fast_reprobe_needed,
             effective_live=effective_live,
+            runtime_game_loaded=runtime_game_loaded,
         )
         self._restart_emulator_probe(immediate=fast_reprobe_needed)
 

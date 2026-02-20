@@ -317,7 +317,9 @@ class AchievementMixin:
         awarded = self._safe_int(achievement.get("NumAwarded"))
         awarded_hardcore = self._safe_int(achievement.get("NumAwardedHardcore"))
         feasibility = self._build_achievement_feasibility(awarded, total_players, true_ratio_value)
+        achievement_id = self._safe_int(achievement.get("ID"))
         return {
+            "id": str(achievement_id) if achievement_id > 0 else "",
             "title": title,
             "description": description,
             "points": f"{points} points",

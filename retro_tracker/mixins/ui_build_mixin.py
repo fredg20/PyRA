@@ -39,8 +39,6 @@ class UiBuildMixin:
         self.file_menu_profile_index = int(end_index) if end_index is not None else None
         if self.file_menu_profile_index is not None:
             file_menu.entryconfigure(self.file_menu_profile_index, state="disabled")
-        file_menu.bind("<<MenuSelect>>", self._on_file_menu_select)
-        file_menu.bind("<Unmap>", self._on_file_menu_unmap)
         file_menu.add_command(
             label="Sauvegarder la configuration",
             command=self.save_config,
@@ -99,9 +97,6 @@ class UiBuildMixin:
         self.profile_button = ttk.Button(self.top_bar, text="Profil", command=self._on_profile_maintenance_request)
         self.profile_button.grid(row=0, column=1, padx=(0, 8), sticky=W)
         self.profile_button.state(["disabled"])
-        self.profile_button.bind("<Enter>", self._on_profile_button_enter)
-        self.profile_button.bind("<Motion>", self._on_profile_button_motion)
-        self.profile_button.bind("<Leave>", self._on_profile_button_leave)
         self.theme_toggle_frame = ttk.Frame(self.top_bar)
         self.theme_toggle_frame.grid(row=0, column=2, padx=(0, 8), sticky="e")
         status_tab = ttk.Frame(self.theme_toggle_frame, style="StatusTab.TFrame", padding=(12, 6, 12, 5))
@@ -181,9 +176,6 @@ class UiBuildMixin:
             tab_button.grid(row=0, column=index, sticky="w", padx=(0, right_gap))
             if tab_key in MAIN_TAB_MAINTENANCE_KEYS:
                 tab_button.state(["disabled"])
-                tab_button.bind("<Enter>", self._on_maintenance_tab_button_enter)
-                tab_button.bind("<Motion>", self._on_maintenance_tab_button_motion)
-                tab_button.bind("<Leave>", self._on_maintenance_tab_button_leave)
             self.main_tab_buttons[tab_key] = tab_button
         self.game_tree = self._build_games_table(games_tab)
         self.recent_tree = self._build_recent_table(recent_tab)
@@ -434,6 +426,21 @@ class UiBuildMixin:
             textvariable=self.current_game_next_achievement_feasibility,
             style="CurrentNext.TLabel",
         ).grid(row=3, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        ttk.Label(
+            next_info,
+            textvariable=self.current_game_next_achievement_measured,
+            style="CurrentNext.TLabel",
+        ).grid(row=4, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        measured_progress = ttk.Progressbar(
+            next_info,
+            orient=HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            value=0,
+            style="CurrentNext.Horizontal.TProgressbar",
+        )
+        measured_progress.grid(row=5, column=0, sticky="ew", padx=(0, 0), pady=field_gap_y)
+        self.current_game_next_achievement_measured_progress = measured_progress
         nav_row = ttk.Frame(next_achievement, style="CurrentNext.TFrame")
         nav_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 0), pady=(10, 0))
         nav_row.columnconfigure(0, weight=0)

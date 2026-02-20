@@ -13,7 +13,7 @@ import base64
 from datetime import datetime
 from ctypes import wintypes
 from pathlib import Path
-from tkinter import END, HORIZONTAL, LEFT, W, BooleanVar, Canvas, Menu, PhotoImage, StringVar, TclError, Tk, Toplevel, messagebox
+from tkinter import END, HORIZONTAL, LEFT, W, BooleanVar, Canvas, Entry, Frame, Menu, PhotoImage, StringVar, TclError, Tk, Toplevel, messagebox
 from tkinter import ttk
 
 import requests
@@ -152,6 +152,7 @@ class TrackerApp(
         self.current_game_next_achievement_points = StringVar(value=ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_unlocks = StringVar(value=ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_feasibility = StringVar(value=ACHIEVEMENT_NA_VALUE)
+        self.current_game_next_achievement_measured = StringVar(value=ACHIEVEMENT_NA_VALUE)
         self.current_game_achievements_note = StringVar(value="Aucun succès à afficher.")
         self.current_game_achievement_order_mode = ACHIEVEMENT_ORDER_NORMAL
         self.current_game_achievement_order_label = StringVar(
@@ -178,8 +179,6 @@ class TrackerApp(
         self.emulator_status_tab: ttk.Frame | None = None
         self.emulator_status_label: ttk.Label | None = None
         self.top_bar: ttk.Frame | None = None
-        self.stats_frame: ttk.LabelFrame | None = None
-        self.stat_cells: list[ttk.Frame] = []
         self.game_tree: ttk.Treeview | None = None
         self.recent_tree: ttk.Treeview | None = None
         self.main_tabs: ttk.Notebook | None = None
@@ -190,6 +189,7 @@ class TrackerApp(
         self.current_game_info_tree: ttk.Treeview | None = None
         self.current_game_title_value_label: ttk.Label | None = None
         self.current_game_next_achievement_desc_label: ttk.Label | None = None
+        self.current_game_next_achievement_measured_progress: ttk.Progressbar | None = None
         self.current_game_previous_achievement_button: ttk.Button | None = None
         self.current_game_next_achievement_button: ttk.Button | None = None
         self.current_game_achievement_order_button: ttk.Button | None = None
@@ -224,10 +224,6 @@ class TrackerApp(
         self.current_game_active_images: dict[str, bytes] = {}
         self.current_game_achievement_tooltip: Toplevel | None = None
         self.current_game_achievement_tooltip_label: ttk.Label | None = None
-        self.maintenance_tab_tooltip: Toplevel | None = None
-        self.maintenance_tab_tooltip_label: ttk.Label | None = None
-        self.profile_maintenance_tooltip: Toplevel | None = None
-        self.profile_maintenance_tooltip_label: ttk.Label | None = None
         self.current_game_achievement_scroll_job: str | None = None
         self.current_game_achievement_scroll_direction = 1
         self.current_game_achievement_hovered = False
@@ -242,7 +238,6 @@ class TrackerApp(
         self.startup_loader_label: ttk.Label | None = None
         self.startup_loader_progress: ttk.Progressbar | None = None
         self._last_layout_width = 0
-        self._last_profile_layout_width = 0
         self._last_modal_anchor: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.style = ttk.Style(self.root)
         self.theme_colors: dict[str, str] = {}
@@ -304,6 +299,10 @@ class TrackerApp(
         self._pending_emulator_unlock_preview: dict[str, str] | None = None
         self._last_emulator_unlock_preview_signature = ""
         self._last_emulator_probe_matches: dict[str, list[str]] = {}
+        self._last_emulator_probe_game_load_states: dict[str, bool] = {}
+        self._measured_probe_state: dict[str, object] = {}
+        self._runtime_measured_event: dict[str, str] | None = None
+        self.current_game_visible_achievement_id = 0
         self.has_saved_connection_record = False
         self.is_closing = False
         self.debug_logger: logging.Logger | None = None
@@ -323,7 +322,6 @@ class TrackerApp(
         self.root.after_idle(self._apply_rounded_corners_to_widget_tree)
         self._load_config()
         self.root.bind("<Configure>", self._on_root_configure)
-        self.root.bind_all("<Motion>", self._on_global_pointer_motion, add="+")
         self.root.report_callback_exception = self._on_tk_callback_exception
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self._show_startup_loader()
@@ -766,6 +764,8 @@ class TrackerApp(
         self.current_game_next_achievement_points.set(ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_unlocks.set(ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_feasibility.set(ACHIEVEMENT_NA_VALUE)
+        self.current_game_visible_achievement_id = 0
+        self._set_current_game_measured_display(ACHIEVEMENT_NA_VALUE, None)
         self.current_game_achievements_note.set("Aucun succès à afficher.")
         self.current_game_locked_achievements = []
         self.current_game_locked_achievement_index = 0
@@ -1046,12 +1046,21 @@ class TrackerApp(
     # Method: _is_live_source_label - Indique si la source correspond à une détection directe du jeu en cours.
     def _is_live_source_label(self, source_value: str) -> bool:
         lowered = source_value.strip().lower()
-        return lowered.startswith("direct") or lowered.startswith("live")
+        if lowered.startswith("live"):
+            return True
+        if lowered.startswith("direct estim"):
+            return False
+        return lowered.startswith("direct")
+
+    # Method: _is_estimated_live_source_label - Indique si la source correspond a une detection live estimee.
+    def _is_estimated_live_source_label(self, source_value: str) -> bool:
+        lowered = source_value.strip().lower()
+        return lowered.startswith("direct estim")
 
     # Method: _is_fallback_source_label - Indique si la source correspond à un repli local.
     def _is_fallback_source_label(self, source_value: str) -> bool:
         lowered = source_value.strip().lower()
-        return lowered.startswith("secours") or lowered.startswith("fallback")
+        return lowered.startswith("secours") or lowered.startswith("fallback") or lowered.startswith("direct estim")
 
     # Method: _set_current_game_source - Met à jour la source de détection et son style visuel.
     def _set_current_game_source(self, source_value: str) -> None:
@@ -1059,6 +1068,68 @@ class TrackerApp(
         self.current_game_source.set(normalized)
         if self.current_game_source_value_label is not None:
             self.current_game_source_value_label.configure(style=self._source_label_style(normalized))
+        self._apply_runtime_measured_to_visible_achievement()
+
+    # Method: _set_current_game_measured_display - Met a jour le texte + barre de progression "Measured".
+    def _set_current_game_measured_display(self, measured_text: str, percent: float | None) -> None:
+        text = self._safe_text(measured_text)
+        if text and text not in {"-", ACHIEVEMENT_NA_VALUE}:
+            if text.casefold().startswith("mesure"):
+                display_text = text
+            else:
+                display_text = f"Mesure: {text}"
+        else:
+            display_text = ACHIEVEMENT_NA_VALUE
+        self.current_game_next_achievement_measured.set(display_text)
+
+        progress_value = 0.0
+        if percent is not None:
+            progress_value = max(0.0, min(100.0, percent))
+        progressbar = self.current_game_next_achievement_measured_progress
+        if progressbar is not None and progressbar.winfo_exists():
+            progressbar.configure(value=progress_value)
+
+    # Method: _apply_runtime_measured_to_visible_achievement - Affiche la progression Measured si elle correspond au succes visible.
+    def _apply_runtime_measured_to_visible_achievement(self, next_achievement: dict[str, str] | None = None) -> None:
+        if not self._is_live_source_label(self.current_game_source.get()):
+            self._set_current_game_measured_display(ACHIEVEMENT_NA_VALUE, None)
+            return
+
+        visible_id = self.current_game_visible_achievement_id
+        if isinstance(next_achievement, dict):
+            visible_id = self._safe_int(next_achievement.get("id") or next_achievement.get("achievement_id"))
+            self.current_game_visible_achievement_id = visible_id
+
+        runtime_event = self._runtime_measured_event if isinstance(self._runtime_measured_event, dict) else None
+        visible_title = self._safe_text(
+            (next_achievement.get("title") if isinstance(next_achievement, dict) else "")
+            or self.current_game_next_achievement_title.get()
+        ).casefold()
+        if isinstance(runtime_event, dict):
+            event_id = self._safe_int(runtime_event.get("achievement_id"))
+            event_title = self._safe_text(runtime_event.get("title")).casefold()
+            id_match = visible_id > 0 and event_id > 0 and visible_id == event_id
+            title_match = visible_id <= 0 and bool(visible_title) and bool(event_title) and visible_title == event_title
+            if id_match or title_match:
+                measured_text = self._safe_text(runtime_event.get("measured_text"))
+                measured_percent = self._safe_float(runtime_event.get("measured_percent"))
+                self._set_current_game_measured_display(measured_text, measured_percent)
+                return
+
+        base_text = ""
+        base_percent: float | None = None
+        if isinstance(next_achievement, dict):
+            base_text = self._safe_text(next_achievement.get("measured"))
+            base_percent = self._safe_float(next_achievement.get("measured_percent"))
+        self._set_current_game_measured_display(base_text or ACHIEVEMENT_NA_VALUE, base_percent)
+
+    # Method: _on_runtime_measured_probe_result - Applique le resultat de la sonde runtime "Measured".
+    def _on_runtime_measured_probe_result(self, measured_event: dict[str, str] | None) -> None:
+        if isinstance(measured_event, dict):
+            self._runtime_measured_event = {str(key): str(value) for key, value in measured_event.items()}
+        else:
+            self._runtime_measured_event = None
+        self._apply_runtime_measured_to_visible_achievement()
 
     # Method: _set_current_game_info_rows - Met à jour la valeur ou l'état associé.
     def _set_current_game_info_rows(self, rows: list[tuple[str, str]]) -> None:
@@ -1350,162 +1421,9 @@ class TrackerApp(
         if tooltip.winfo_exists():
             tooltip.withdraw()
 
-    # Method: _show_maintenance_tab_tooltip - Affiche une infobulle de maintenance au survol des onglets désactivés.
-    def _show_maintenance_tab_tooltip(self, text: str) -> None:
-        tooltip_text = text.strip()
-        if not tooltip_text:
-            return
-        if self.maintenance_tab_tooltip is None or not self.maintenance_tab_tooltip.winfo_exists():
-            tip = Toplevel(self.root)
-            tip.overrideredirect(True)
-            try:
-                tip.attributes("-topmost", True)
-            except TclError:
-                pass
-            label = ttk.Label(tip, style="Tooltip.TLabel", justify="left", anchor="w")
-            label.grid(row=0, column=0, sticky="nsew")
-            self.maintenance_tab_tooltip = tip
-            self.maintenance_tab_tooltip_label = label
-            self.root.after_idle(lambda: self._apply_rounded_corners_to_widget_tree(tip))
-        if self.maintenance_tab_tooltip_label is not None:
-            self.maintenance_tab_tooltip_label.configure(text=tooltip_text)
-        self._move_maintenance_tab_tooltip()
-        if self.maintenance_tab_tooltip is not None:
-            self.maintenance_tab_tooltip.deiconify()
-
-    # Method: _move_maintenance_tab_tooltip - Repositionne l'infobulle de maintenance près du pointeur.
-    def _move_maintenance_tab_tooltip(self) -> None:
-        tooltip = self.maintenance_tab_tooltip
-        if tooltip is None or not tooltip.winfo_exists():
-            return
-        x = self.root.winfo_pointerx() + 12
-        y = self.root.winfo_pointery() + 16
-        tooltip.geometry(f"+{x}+{y}")
-
-    # Method: _hide_maintenance_tab_tooltip - Masque l'infobulle de maintenance.
-    def _hide_maintenance_tab_tooltip(self) -> None:
-        tooltip = self.maintenance_tab_tooltip
-        if tooltip is None:
-            return
-        if tooltip.winfo_exists():
-            tooltip.withdraw()
-
-    # Method: _show_profile_maintenance_tooltip - Affiche l'infobulle de maintenance pour le bouton/menu Profil.
-    def _show_profile_maintenance_tooltip(self, text: str) -> None:
-        tooltip_text = text.strip()
-        if not tooltip_text:
-            return
-        if self.profile_maintenance_tooltip is None or not self.profile_maintenance_tooltip.winfo_exists():
-            tip = Toplevel(self.root)
-            tip.overrideredirect(True)
-            try:
-                tip.attributes("-topmost", True)
-            except TclError:
-                pass
-            label = ttk.Label(tip, style="Tooltip.TLabel", justify="left", anchor="w")
-            label.grid(row=0, column=0, sticky="nsew")
-            self.profile_maintenance_tooltip = tip
-            self.profile_maintenance_tooltip_label = label
-            self.root.after_idle(lambda: self._apply_rounded_corners_to_widget_tree(tip))
-        if self.profile_maintenance_tooltip_label is not None:
-            self.profile_maintenance_tooltip_label.configure(text=tooltip_text)
-        self._move_profile_maintenance_tooltip()
-        if self.profile_maintenance_tooltip is not None:
-            self.profile_maintenance_tooltip.deiconify()
-
-    # Method: _move_profile_maintenance_tooltip - Repositionne l'infobulle de maintenance Profil près du pointeur.
-    def _move_profile_maintenance_tooltip(self) -> None:
-        tooltip = self.profile_maintenance_tooltip
-        if tooltip is None or not tooltip.winfo_exists():
-            return
-        x = self.root.winfo_pointerx() + 12
-        y = self.root.winfo_pointery() + 16
-        tooltip.geometry(f"+{x}+{y}")
-
-    # Method: _hide_profile_maintenance_tooltip - Masque l'infobulle de maintenance Profil.
-    def _hide_profile_maintenance_tooltip(self) -> None:
-        tooltip = self.profile_maintenance_tooltip
-        if tooltip is None:
-            return
-        if tooltip.winfo_exists():
-            tooltip.withdraw()
-
-    # Method: _on_profile_button_enter - Affiche l'infobulle lors du survol du bouton Profil.
-    def _on_profile_button_enter(self, _event: object) -> None:
-        self._show_profile_maintenance_tooltip("En maintenance")
-
-    # Method: _on_profile_button_motion - Déplace l'infobulle pendant le survol du bouton Profil.
-    def _on_profile_button_motion(self, _event: object) -> None:
-        self._show_profile_maintenance_tooltip("En maintenance")
-
-    # Method: _on_profile_button_leave - Masque l'infobulle quand le survol du bouton Profil se termine.
-    def _on_profile_button_leave(self, _event: object) -> None:
-        self._hide_profile_maintenance_tooltip()
-
-    # Method: _on_file_menu_select - Affiche l'infobulle quand l'entrée Profil du menu Fichier est survolée.
-    def _on_file_menu_select(self, _event: object) -> None:
-        menu = self.file_menu
-        target_index = self.file_menu_profile_index
-        if menu is None or target_index is None:
-            self._hide_profile_maintenance_tooltip()
-            return
-        try:
-            active = menu.index("active")
-        except TclError:
-            self._hide_profile_maintenance_tooltip()
-            return
-        if active == target_index:
-            self._show_profile_maintenance_tooltip("En maintenance")
-            return
-        self._hide_profile_maintenance_tooltip()
-
-    # Method: _on_file_menu_unmap - Masque l'infobulle quand le menu Fichier se ferme.
-    def _on_file_menu_unmap(self, _event: object) -> None:
-        self._hide_profile_maintenance_tooltip()
-
     # Method: _on_profile_maintenance_request - Indique que l'ouverture du profil est temporairement désactivée.
     def _on_profile_maintenance_request(self) -> None:
         self.status_text.set("Profil en maintenance.")
-
-    # Method: _is_pointer_over_profile_button - Détermine si le pointeur survole la zone du bouton Profil.
-    def _is_pointer_over_profile_button(self) -> bool:
-        button = self.profile_button
-        if button is None or not button.winfo_exists() or not button.winfo_viewable():
-            return False
-        pointer_x = self.root.winfo_pointerx()
-        pointer_y = self.root.winfo_pointery()
-        x = button.winfo_rootx()
-        y = button.winfo_rooty()
-        width = button.winfo_width()
-        height = button.winfo_height()
-        return x <= pointer_x < (x + width) and y <= pointer_y < (y + height)
-
-    # Method: _is_pointer_over_profile_menu_item - Détermine si le pointeur survole l'entrée Profil du menu Fichier.
-    def _is_pointer_over_profile_menu_item(self) -> bool:
-        menu = self.file_menu
-        target_index = self.file_menu_profile_index
-        if menu is None or target_index is None or not menu.winfo_exists() or not menu.winfo_ismapped():
-            return False
-        pointer_x = self.root.winfo_pointerx()
-        pointer_y = self.root.winfo_pointery()
-        menu_x = menu.winfo_rootx()
-        menu_y = menu.winfo_rooty()
-        menu_w = menu.winfo_width()
-        menu_h = menu.winfo_height()
-        if not (menu_x <= pointer_x < (menu_x + menu_w) and menu_y <= pointer_y < (menu_y + menu_h)):
-            return False
-        try:
-            hover_index = menu.index(f"@{pointer_y - menu_y}")
-        except TclError:
-            return False
-        return hover_index == target_index
-
-    # Method: _on_global_pointer_motion - Affiche l'infobulle de maintenance du Profil selon la zone survolée.
-    def _on_global_pointer_motion(self, _event: object) -> None:
-        if self._is_pointer_over_profile_button() or self._is_pointer_over_profile_menu_item():
-            self._show_profile_maintenance_tooltip("En maintenance")
-            return
-        self._hide_profile_maintenance_tooltip()
 
     # Method: _on_main_tab_button_press - Gère le clic sur un bouton de navigation principal.
     def _on_main_tab_button_press(self, tab_key: str) -> None:
@@ -1516,11 +1434,10 @@ class TrackerApp(
         if button is not None:
             try:
                 if button.instate(["disabled"]):
-                    self._show_maintenance_tab_tooltip("En maintenance")
+                    self._set_status_message("Onglet en maintenance.", muted=True)
                     return
             except TclError:
                 return
-        self._hide_maintenance_tab_tooltip()
         self._select_main_tab(resolved_tab_key)
 
     # Method: _resolve_main_tab_key - Convertit une clé ou un libellé d'onglet vers la clé interne canonique.
@@ -1562,18 +1479,6 @@ class TrackerApp(
             style_name = "MainTabSelected.TButton" if key == resolved_tab_key else "TButton"
             button.configure(style=style_name)
 
-    # Method: _on_maintenance_tab_button_enter - Affiche l'infobulle au survol d'un bouton d'onglet en maintenance.
-    def _on_maintenance_tab_button_enter(self, _event: object) -> None:
-        self._show_maintenance_tab_tooltip("En maintenance")
-
-    # Method: _on_maintenance_tab_button_motion - Déplace l'infobulle pendant le survol d'un bouton d'onglet en maintenance.
-    def _on_maintenance_tab_button_motion(self, _event: object) -> None:
-        self._show_maintenance_tab_tooltip("En maintenance")
-
-    # Method: _on_maintenance_tab_button_leave - Masque l'infobulle de maintenance quand le pointeur quitte le bouton.
-    def _on_maintenance_tab_button_leave(self, _event: object) -> None:
-        self._hide_maintenance_tab_tooltip()
-
     # Method: _sanitize_success_points_text - Retire la partie "True ratio" des anciens textes éventuellement en cache.
     def _sanitize_success_points_text(self, points_text: str) -> str:
         text = self._safe_text(points_text)
@@ -1594,6 +1499,8 @@ class TrackerApp(
             self.current_game_next_achievement_points.set(ACHIEVEMENT_NA_VALUE)
             self.current_game_next_achievement_unlocks.set(ACHIEVEMENT_NA_VALUE)
             self.current_game_next_achievement_feasibility.set(ACHIEVEMENT_NA_VALUE)
+            self.current_game_visible_achievement_id = 0
+            self._set_current_game_measured_display(ACHIEVEMENT_NA_VALUE, None)
             return
 
         description = self._safe_text(next_achievement.get("description", ACHIEVEMENT_NA_VALUE))
@@ -1607,11 +1514,15 @@ class TrackerApp(
                 )
             description = translated_description
         points_text = self._sanitize_success_points_text(next_achievement.get("points", ACHIEVEMENT_NA_VALUE))
+        self.current_game_visible_achievement_id = self._safe_int(
+            next_achievement.get("id") or next_achievement.get("achievement_id")
+        )
         self.current_game_next_achievement_title.set(next_achievement.get("title", ACHIEVEMENT_NA_VALUE))
         self.current_game_next_achievement_description.set(description or ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_points.set(points_text or ACHIEVEMENT_NA_VALUE)
         self.current_game_next_achievement_unlocks.set(next_achievement.get("unlocks", ACHIEVEMENT_NA_VALUE))
         self.current_game_next_achievement_feasibility.set(next_achievement.get("feasibility", ACHIEVEMENT_NA_VALUE))
+        self._apply_runtime_measured_to_visible_achievement(next_achievement=next_achievement)
 
     # Method: _translate_achievement_description_cached_only - Retourne uniquement la traduction déjà en cache (jamais d'appel réseau).
     def _translate_achievement_description_cached_only(self, description: str) -> str:
@@ -1824,6 +1735,7 @@ class TrackerApp(
             description = self._translate_achievement_description_cached_only(description)
             locked.append(
                 {
+                    "id": self._safe_text(item.get("next_id")),
                     "image_key": self._safe_text(item.get("image_key")),
                     "title": title or ACHIEVEMENT_NA_VALUE,
                     "description": description or ACHIEVEMENT_NA_VALUE,
@@ -1943,6 +1855,7 @@ class TrackerApp(
         description = self._translate_achievement_description_cached_only(description)
         self._set_current_game_achievement_rows(
             {
+                "id": self._safe_text(row.get("next_id")),
                 "title": self._safe_text(row.get("next_title")) or ACHIEVEMENT_NA_VALUE,
                 "description": description or ACHIEVEMENT_NA_VALUE,
                 "points": self._safe_text(row.get("next_points")) or ACHIEVEMENT_NA_VALUE,
@@ -1961,6 +1874,7 @@ class TrackerApp(
         self._clear_current_game_clicked_achievement_selection()
         self._set_current_game_achievement_rows(
             {
+                "id": self._safe_text(achievement_data.get("id") or achievement_data.get("achievement_id")),
                 "title": self._safe_text(achievement_data.get("title")) or ACHIEVEMENT_NA_VALUE,
                 "description": self._safe_text(achievement_data.get("description")) or "Succès débloqué.",
                 "points": self._safe_text(achievement_data.get("points")) or ACHIEVEMENT_NA_VALUE,
@@ -2067,6 +1981,7 @@ class TrackerApp(
         selected = self.current_game_locked_achievements[self.current_game_locked_achievement_index]
         self._set_current_game_achievement_rows(
             {
+                "id": selected.get("id", "0"),
                 "title": selected.get("title", ACHIEVEMENT_NA_VALUE),
                 "description": selected.get("description", ACHIEVEMENT_NA_VALUE),
                 "points": selected.get("points", ACHIEVEMENT_NA_VALUE),
@@ -2088,9 +2003,13 @@ class TrackerApp(
         self.current_game_locked_achievements = self._extract_locked_achievements(ordered_achievements)
         self.current_game_locked_achievement_index = 0
         if preferred_next_achievement and self.current_game_locked_achievements:
+            preferred_id = self._safe_int(preferred_next_achievement.get("id") or preferred_next_achievement.get("achievement_id"))
             preferred_title = self._safe_text(preferred_next_achievement.get("title"))
             preferred_description = self._safe_text(preferred_next_achievement.get("description"))
             for index, item in enumerate(self.current_game_locked_achievements):
+                if preferred_id > 0 and self._safe_int(item.get("id")) == preferred_id:
+                    self.current_game_locked_achievement_index = index
+                    break
                 if item.get("title", "") != preferred_title:
                     continue
                 if preferred_description and item.get("description", "") != preferred_description:
@@ -2481,6 +2400,7 @@ class TrackerApp(
         recent = summary.get("RecentlyPlayed")
         recent_activity_detected = False
         best_recent_game_id = 0
+        best_recent_title = ""
         best_recent_timestamp = -1.0
         strict_best_recent_game_id = 0
         strict_best_recent_title = ""
@@ -2509,6 +2429,7 @@ class TrackerApp(
                     if game_id > 0 and candidate_timestamp > best_recent_timestamp:
                         best_recent_timestamp = candidate_timestamp
                         best_recent_game_id = game_id
+                        best_recent_title = title
                 is_strict_recent_item = self._is_recent_activity_timestamp(
                     candidate_date,
                     max_age_seconds=LIVE_RECENT_PLAYED_FALLBACK_MAX_AGE_SECONDS,
@@ -2535,6 +2456,7 @@ class TrackerApp(
                 strict_fallback_presence_recent=strict_fallback_presence_recent,
                 recent_activity=recent_activity_detected,
                 best_recent_game_id=best_recent_game_id,
+                best_recent_title=best_recent_title or "-",
                 strict_best_recent_game_id=strict_best_recent_game_id,
                 online=is_online_value,
                 rich_presence_preview=rich_presence_preview or "-",
@@ -2571,14 +2493,16 @@ class TrackerApp(
                     online,
                     "recent_fallback",
                 )
-            if best_recent_game_id > 0:
+            if emulator_live and best_recent_game_id > 0:
                 return emit_result(
-                    0,
-                    "",
+                    best_recent_game_id,
+                    best_recent_title,
                     rich_presence,
                     online,
-                    "recent_fallback_rejected_relaxed_blocked",
+                    "recent_fallback_relaxed",
                 )
+            if best_recent_game_id > 0:
+                return emit_result(0, "", rich_presence, online, "recent_fallback_rejected_relaxed_blocked")
 
         # Sans Rich Presence exploitable, on peut encore confirmer un jeu chargé
         # quand l'émulateur est vivant ET qu'une activité très récente est visible.
@@ -2602,7 +2526,13 @@ class TrackerApp(
                     "recent_strict_no_presence",
                 )
             if best_recent_game_id > 0:
-                return emit_result(0, "", rich_presence, online, "recent_no_presence_rejected_relaxed_blocked")
+                return emit_result(
+                    best_recent_game_id,
+                    best_recent_title,
+                    rich_presence,
+                    online,
+                    "recent_relaxed_no_presence",
+                )
 
         return emit_result(0, "", rich_presence, online, "no_live_game")
 
@@ -3097,7 +3027,10 @@ class TrackerApp(
                 game_id = live_game_id
                 if live_title:
                     title_hint = live_title
-                source_label = "Direct émulateur" if emulator_live else "Direct RA"
+                if emulator_live and live_decision in {"recent_fallback_relaxed", "recent_relaxed_no_presence"}:
+                    source_label = "Direct estimé émulateur"
+                else:
+                    source_label = "Direct émulateur" if emulator_live else "Direct RA"
             elif emulator_live and last_played_id > 0:
                 # Fallback prudent: on affiche un jeu plausible, sans le considérer comme "jeu live confirmé".
                 game_id = last_played_id
@@ -3333,6 +3266,8 @@ class TrackerApp(
         )
         if self._is_live_source_label(source_label):
             note = "Jeu détecté en direct."
+        elif self._is_estimated_live_source_label(source_label):
+            note = "Jeu estimé en direct (confirmation partielle)."
         elif source_label.startswith("Dernier jeu joué"):
             if emulator_live and not inactive_mode:
                 note = "Émulateur chargé: jeu direct indisponible, affichage du dernier jeu joué."
@@ -3442,6 +3377,30 @@ class TrackerApp(
     def _sync_emulator_status_after_current_game_update(self, source_value: str) -> None:
         previous_status = self.emulator_status_text.get().strip()
         emulator_process_live = self._is_emulator_process_live()
+        runtime_states = (
+            self._last_emulator_probe_game_load_states
+            if isinstance(self._last_emulator_probe_game_load_states, dict)
+            else {}
+        )
+        probe_matches = (
+            self._last_emulator_probe_matches
+            if isinstance(self._last_emulator_probe_matches, dict)
+            else {}
+        )
+        runtime_game_loaded = any(
+            bool(runtime_states.get(name, False)) and bool(matches)
+            for name, matches in probe_matches.items()
+        )
+        if emulator_process_live and runtime_game_loaded:
+            self._set_emulator_status_text(EMULATOR_STATUS_GAME_LOADED)
+            self._probe(
+                "sync_status_after_game_update",
+                source=source_value,
+                previous_status=previous_status,
+                next_status=EMULATOR_STATUS_GAME_LOADED,
+                mode="runtime_probe",
+            )
+            return
         if self._is_live_source_label(source_value) and emulator_process_live:
             self._set_emulator_status_text(EMULATOR_STATUS_GAME_LOADED)
             self._probe(
@@ -3449,6 +3408,7 @@ class TrackerApp(
                 source=source_value,
                 previous_status=previous_status,
                 next_status=EMULATOR_STATUS_GAME_LOADED,
+                mode="source_live",
             )
             return
         if not emulator_process_live:
@@ -3458,6 +3418,7 @@ class TrackerApp(
                 source=source_value,
                 previous_status=previous_status,
                 next_status=EMULATOR_STATUS_INACTIVE,
+                mode="emulator_inactive",
             )
             return
         self._set_emulator_status_text(EMULATOR_STATUS_EMULATOR_LOADED)
@@ -3466,6 +3427,7 @@ class TrackerApp(
             source=source_value,
             previous_status=previous_status,
             next_status=EMULATOR_STATUS_EMULATOR_LOADED,
+            mode="emulator_loaded",
         )
 
     # Method: _on_current_game_loaded - Traite l'événement correspondant.
@@ -3540,13 +3502,6 @@ class TrackerApp(
         self._trigger_refresh_after_live_game_loaded(source_value or self.current_game_source.get())
         self._apply_pending_emulator_unlock_preview_if_ready()
         self._finalize_current_game_loading_overlay_after_gallery()
-
-    # Method: _stat_label - Réalise le traitement lié à stat label.
-    def _stat_label(self, parent: ttk.LabelFrame, title: str, var: StringVar) -> ttk.Frame:
-        cell = ttk.Frame(parent)
-        ttk.Label(cell, text=title).grid(row=0, column=0, sticky=W)
-        ttk.Label(cell, textvariable=var).grid(row=1, column=0, sticky=W, pady=(2, 0))
-        return cell
 
     # Method: _on_root_configure - Traite l'événement correspondant.
     def _on_root_configure(self, event: object) -> None:
@@ -3759,6 +3714,7 @@ class TrackerApp(
             description = self._safe_text(row.get("next_description"))
             description = self._translate_achievement_description_cached_only(description)
             preview_data = {
+                "id": str(achievement_id),
                 "achievement_id": str(achievement_id),
                 "image_key": self._safe_text(row.get("image_key")),
                 "title": self._safe_text(row.get("next_title")) or self._safe_text(unlocked_event.get("title")),
@@ -3769,6 +3725,7 @@ class TrackerApp(
             }
         else:
             preview_data = {
+                "id": str(achievement_id),
                 "achievement_id": str(achievement_id),
                 "image_key": "",
                 "title": self._safe_text(unlocked_event.get("title")) or f"Succès #{achievement_id}",
@@ -4140,8 +4097,6 @@ class TrackerApp(
         if self.is_closing:
             return
         self.is_closing = True
-        self._hide_maintenance_tab_tooltip()
-        self._hide_profile_maintenance_tooltip()
         self._hide_startup_loader()
         self._hide_current_game_loading_overlay()
         self._cancel_scheduled_jobs()
@@ -4280,29 +4235,66 @@ class TrackerApp(
         win.grab_set()
         win.resizable(True, True)
         win.minsize(420, 160)
-        win.configure(bg=self.theme_colors.get("root_bg", "#f3f5f8"))
+        win.configure(
+            bg=self.theme_colors.get("panel_bg", "#ffffff"),
+            bd=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+        )
         win.columnconfigure(0, weight=1)
         win.rowconfigure(0, weight=1)
         win.protocol("WM_DELETE_WINDOW", self._close_connection_window)
         win.bind("<Configure>", lambda _event: self._on_modal_window_configure(self.connection_window))
 
         content = ttk.Frame(win, style="Modal.TFrame", padding=(12, 12, 12, 10))
-        content.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        content.columnconfigure(1, weight=1)
+        content.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        content.columnconfigure(0, weight=1)
+
+        form = ttk.Frame(content, style="Modal.TFrame")
+        form.grid(row=0, column=0, pady=(0, 8))
+        form.columnconfigure(1, weight=0)
 
         key_var = StringVar(value=self.api_key.get())
         api_user_var = StringVar(value=self.api_username.get())
+        entry_bg = self.theme_colors.get("field_bg", "#ffffff")
+        entry_fg = self.theme_colors.get("field_fg", "#111111")
 
-        ttk.Label(content, text="Clé API", style="Modal.TLabel").grid(row=0, column=0, sticky=W, padx=2, pady=(2, 6))
-        ttk.Entry(content, textvariable=key_var, show="*", style="Modal.TEntry").grid(
-            row=0, column=1, sticky="ew", padx=2, pady=(2, 6)
+        ttk.Label(form, text="Nom d'utilisateur", style="Modal.TLabel").grid(
+            row=0, column=0, sticky="e", padx=(2, 12), pady=(2, 6)
         )
+        username_entry_wrap = Frame(form, bg=entry_bg, bd=0, highlightthickness=0)
+        username_entry_wrap.grid(row=0, column=1, sticky="w", padx=(0, 2), pady=(2, 6))
+        Entry(
+            username_entry_wrap,
+            textvariable=api_user_var,
+            width=28,
+            bg=entry_bg,
+            fg=entry_fg,
+            insertbackground=entry_fg,
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+        ).pack(padx=(8, 6), pady=3)
 
-        ttk.Label(content, text="Nom d'utilisateur API", style="Modal.TLabel").grid(row=1, column=0, sticky=W, padx=2, pady=6)
-        ttk.Entry(content, textvariable=api_user_var, style="Modal.TEntry").grid(row=1, column=1, sticky="ew", padx=2, pady=6)
+        ttk.Label(form, text="Clé API", style="Modal.TLabel").grid(row=1, column=0, sticky="e", padx=(2, 12), pady=6)
+        key_entry_wrap = Frame(form, bg=entry_bg, bd=0, highlightthickness=0)
+        key_entry_wrap.grid(row=1, column=1, sticky="w", padx=(0, 2), pady=6)
+        Entry(
+            key_entry_wrap,
+            textvariable=key_var,
+            show="●",
+            width=28,
+            bg=entry_bg,
+            fg=entry_fg,
+            insertbackground=entry_fg,
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+        ).pack(padx=(8, 6), pady=3)
 
         buttons = ttk.Frame(content, style="Modal.TFrame")
-        buttons.grid(row=2, column=0, columnspan=2, sticky="e", padx=2, pady=(10, 2))
+        buttons.grid(row=1, column=0, padx=2, pady=(6, 2))
         ttk.Button(
             buttons,
             text="Enregistrer",
@@ -4349,102 +4341,14 @@ class TrackerApp(
         else:
             self._sync_modal_overlay()
 
-    # Method: _apply_profile_layout - Applique les paramètres ou la transformation nécessaires.
-    def _apply_profile_layout(self, width: int) -> None:
-        if self.stats_frame is None or not self.stat_cells:
-            return
-
-        max_columns = 7
-        desired = max(1, min(max_columns, width // 185))
-        for col in range(max_columns):
-            self.stats_frame.columnconfigure(col, weight=0)
-        for col in range(desired):
-            self.stats_frame.columnconfigure(col, weight=1)
-
-        for idx, cell in enumerate(self.stat_cells):
-            row = idx // desired
-            col = idx % desired
-            cell.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-
     # Method: _on_modal_window_configure - Traite l'événement correspondant.
     def _on_modal_window_configure(self, modal: Toplevel | None) -> None:
         self._sync_modal_overlay()
         self._center_modal_window(modal)
 
-    # Method: _on_profile_window_configure - Traite l'événement correspondant.
-    def _on_profile_window_configure(self, _event: object) -> None:
-        self._on_modal_window_configure(self.profile_window)
-        if self.profile_window is None or not self.profile_window.winfo_exists():
-            return
-        width = self.profile_window.winfo_width()
-        if width <= 0 or abs(width - self._last_profile_layout_width) < 12:
-            return
-        self._last_profile_layout_width = width
-        self._apply_profile_layout(width)
-
-    # Method: open_profile_window - [Dormant] Ouvre la fenêtre profil complète.
-    # Conservé volontairement pour réactivation ultérieure; l'UI actuelle reste en maintenance.
+    # Method: open_profile_window - Point d'entrée profil (désactivé tant que la refonte n'est pas terminée).
     def open_profile_window(self) -> None:
-        if not self._has_saved_valid_connection():
-            self.status_text.set("Aucune connexion valide. Configurez la connexion.")
-            self.open_connection_window()
-            return
-
-        if self.connection_window is not None and self.connection_window.winfo_exists():
-            self._close_connection_window()
-
-        if self.profile_window is not None and self.profile_window.winfo_exists():
-            self._sync_modal_overlay()
-            self._center_modal_window(self.profile_window)
-            self.profile_window.lift()
-            self.profile_window.focus_force()
-            return
-
-        self._show_modal_overlay()
-        self._start_modal_tracking()
-        win = Toplevel(self.root)
-        self.profile_window = win
-        self.root.after_idle(lambda: self._apply_rounded_window_corners(win))
-        win.title("Profil RetroAchievements")
-        win.transient(self.root)
-        win.grab_set()
-        win.resizable(True, True)
-        win.minsize(520, 340)
-        win.configure(bg=self.theme_colors.get("root_bg", "#f3f5f8"))
-        win.columnconfigure(0, weight=1)
-        win.rowconfigure(0, weight=1)
-        win.protocol("WM_DELETE_WINDOW", self._close_profile_window)
-        win.bind("<Configure>", self._on_profile_window_configure)
-
-        content = ttk.Frame(win, style="Modal.TFrame", padding=(10, 10, 10, 10))
-        content.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        content.columnconfigure(0, weight=1)
-        content.rowconfigure(1, weight=1)
-
-        self.stats_frame = ttk.LabelFrame(content, text="Statistiques", style="TLabelframe")
-        self.stats_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        self.stat_cells = [
-            self._stat_label(self.stats_frame, "Points", self.stat_points),
-            self._stat_label(self.stats_frame, "Points softcore", self.stat_softcore),
-            self._stat_label(self.stats_frame, "Points true", self.stat_true),
-            self._stat_label(self.stats_frame, "Jeux maîtrisés", self.stat_mastered),
-            self._stat_label(self.stats_frame, "Jeux terminés", self.stat_beaten),
-            self._stat_label(self.stats_frame, "Jeux", self.stat_games),
-            self._stat_label(self.stats_frame, "Dernière synchro", self.stat_snapshot),
-        ]
-
-        buttons = ttk.Frame(content, style="Modal.TFrame")
-        buttons.grid(row=2, column=0, sticky="e", pady=(8, 0))
-        ttk.Button(buttons, text="Fermer", command=self._close_profile_window, style="Modal.TButton").pack(side=LEFT)
-
-        self._apply_profile_layout(win.winfo_width())
-        self.root.after_idle(lambda: self._apply_rounded_corners_to_widget_tree(win))
-        self._sync_modal_overlay()
-        self._center_modal_window(self.profile_window)
-        self._last_modal_anchor = (self.root.winfo_rootx(), self.root.winfo_rooty(), self.root.winfo_width(), self.root.winfo_height())
-        win.lift()
-        win.focus_force()
-        self.refresh_dashboard(show_errors=False)
+        self._on_profile_maintenance_request()
 
     # Method: _close_profile_window - Réalise le traitement lié à close profile window.
     def _close_profile_window(self) -> None:
@@ -4457,9 +4361,6 @@ class TrackerApp(
                 pass
             self.profile_window.destroy()
         self.profile_window = None
-        self.stats_frame = None
-        self.stat_cells = []
-        self._last_profile_layout_width = 0
 
         if self._active_modal_window() is None:
             self._stop_modal_tracking()
